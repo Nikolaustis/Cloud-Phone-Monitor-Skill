@@ -1,0 +1,31 @@
+{
+  "timezone": "Asia/Shanghai",
+  "browser_timeout_ms": 45000,
+  "wait_after_load_ms": 2500,
+  "safe_interactions": true,
+  "baseline_path": "baselines/products_baseline.xlsx",
+  "targets": {
+    "UgPhone": "https://www.ugphone.com/toc-portal/#/purchaseDevice",
+    "VSPhone": "https://cloud.vsphone.com/buy",
+    "Redfinger": "https://www.cloudemulator.net/app/buy?utm_source=buying-guide&utm_medium=btn&utm_campaign=buy-btn&channelCode=web",
+    "LDCloud": "https://www.ldcloud.net/web/mobile/buy"
+  },
+  "quality_price_monitor": {
+    "enabled": true,
+    "base_platform": "UgPhone",
+    "competitor_platforms": ["VSPhone", "Redfinger", "LDCloud"],
+    "effective_period_days": 30,
+    "similarity_thresholds": {
+      "strong_match": 90,
+      "adjusted_match": 75,
+      "weak_match": 60
+    },
+    "relative_index_thresholds": {
+      "below_market": 90,
+      "competitive": 105,
+      "slightly_high": 115
+    },
+    "quality_adjustment_factor_min": 0.75,
+    "quality_adjustment_factor_max": 1.35
+  }
+}
