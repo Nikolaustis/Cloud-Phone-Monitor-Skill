@@ -1,284 +1,357 @@
-# Cloud Phone Baseline Price Monitor
+# FB Game Group Monitor Skill V5.3.0
 
-这个 Codex skill 用来采集 UgPhone、VSPhone、Redfinger、LDCloud 的云手机产品价格，并输出两类监测：
 
-- 同商品基准价监测：用固定 baseline 跟踪每日价格、促销文案、缺失和涨跌。
-- 以 UgPhone 为基准的近似配置质量调整比价：不要按套餐名直接比价，而是根据 Android、CPU、内存、存储、地区和购买时长计算相似度，再做质量调整后的 30 天等效价比较。
+## V5.3.0：游戏名隔离与 Excel 百分比格式
 
-## Install
+- GeoNames 生成查询词前，必须剔除当前游戏的正式名称、别名、受控标题变体及高确定性 IP 根词；游戏名称本身不得成为地名候选。
+- 群名、About 用户文本和讨论区前五条玩家发言进入语言识别前，也必须剔除当前游戏名称及别名，避免英文游戏标题压过西班牙语、泰语等实际讨论语言。
+- `partial_verified_rows.xlsx`、正常完成的 `fb_monitoring_filtered.xlsx`、以及中断恢复生成的最终 XLSX，K/L 两列均为公式单元格并固定采用 `0.00%` 百分比格式。
+- GeoNames 缓存命名空间升级为 `geonames-v5.3`，不复用旧版由游戏词造成的 accepted 假阳性。
 
-```bash
-python -m pip install -r requirements.txt
-python -m playwright install chromium
-```
+## V5.2.2：ID 误判保护与 About 冲突裁决
 
-## Baseline Workflow
+- 群名中的孤立大写 `ID` 不再作为印度尼西亚国家代码。印度尼西亚只能由 `Indonesia / Indo`、印尼语、印尼城市、🇮🇩、About Location 或 GeoNames 等更可靠证据判定。
+- 即使旧任务配置仍在 `region_keywords.ID` 中保留 `id`，运行时也会自动剔除，避免历史配置继续误判账号 ID。
+- 当群名同时命中两个或更多不同地区证据时，不再立即折叠为 `SEA / EA / EUR` 或直接留空；第二轮会先检查已经抓取的 About 所在地。
+- About 本地位置或 About GeoNames 结果若与群名中的某个地区证据一致，则采用 About 的更具体结论，例如 `TH + ID` 且 About 为 Bangkok 时输出 `TH`。
+- About 无法裁决时，同一业务大区的多地区命中仍可回退到宽泛大区；跨业务大区冲突继续留空。
 
-第一次确认产品表质量后，把当前输出保存为基准：
+## V5.2.1：人工复核队列先过数据门槛
 
-```bash
-python run.py --init-baseline
-```
+V5.2.1 修正了旧版 `manual_review` 在阈值判断前写入的问题。现在弱相关候选必须先满足：
 
-默认基准文件路径：
+- `group_size >= 100`；
+- `today_posts >= threshold` 或 `week_new_fans >= threshold`。
 
-```text
-baselines/products_baseline.xlsx
-```
+只有运营数据达标、但标题相关性仍需人工判断的候选，才会进入 `manual_review`。规模或活跃度不达标的候选直接丢弃。人工复核表新增 `group_size`、`today_posts`、`week_new_fans` 三列；审计统计新增人工复核候选及阈值淘汰计数。
 
-后续日常监测直接运行：
+## V5.2.0：地区识别精度修复
 
-```bash
-python run.py
-```
+V5.2.0 重点修复 GeoNames 补全和第二轮地区判断中的假阳性：
 
-如果只想采集产品表，不做同商品 baseline 对比：
+- 两到三位国家/地区代码只在原始文本中以**明确大写代码**出现时生效；小写介词 `de` 不再视为德国，`Trójmiasto` 开头的 `Tr` 不再视为土耳其。
+- 在 Unicode 归一化前移除 `™ / ® / © / ℠`，防止 `™` 被兼容分解为 `TM` 并误判为土库曼斯坦。
+- 群组名称新增城市/省州本地匹配阶段，优先于 GeoNames：支持 `Québec`、`台中`、`台南/臺南`、`Trójmiasto`、`SoCal` 等高确定性地点；`Danmark` 直接映射为 `EUR`。
+- GeoNames 候选抽取不再把整条群名或任意剩余单词当作地点。新增多语言泛词过滤、翻译括号移除、地点短语优先和单词安全检查。
+- `Come`、`Compra`、`Gift`、`trades`、`Bay`、`Only`、`Daily`、`Store`、`Level` 等泛词不会再送入 GeoNames。
+- 对 `San Diego`、`El Paso TX`、`San Antonio`、`Fort Worth`、`Las Vegas` 等连续地点短语优先保留完整查询。
+- GeoNames 缓存键升级为 `geonames-v5.2`，旧版假阳性缓存不会被本版本复用；错误和不安全查询仍不写入缓存。
+- `audit_stats.json` 新增 `external_geocoder_filtered_queries`，统计被安全过滤器拦截的候选查询数。
 
-```bash
-python run.py --skip-baseline-monitor
-```
+地区判断仍遵循保守原则：已有明确国家/地区、本地城市映射或高可信证据时不调用 GeoNames；GeoNames 低置信、歧义或泛词候选均保持 `region` 为空。
 
-如果只想跳过 UgPhone 质量调整比价：
+## V5.1.0：GeoNames 自动启用与高确定性地区规则
 
-```bash
-python run.py --skip-quality-price-monitor
-```
+V5.1.0 解决临时任务配置遗漏 `external_geocoder` 后 GeoNames 静默关闭的问题：
 
-可选质量比价配置：
+- 当任务配置未显式设置 `external_geocoder.enabled`，但 `config/local/geonames.local.json` 或 `GEONAMES_USERNAME` 已提供有效用户名时，第二轮自动启用 GeoNames。
+- 任务配置显式写入 `enabled: false` 时仍会禁用，便于单次任务主动关闭外部请求。
+- `audit_stats.json` 新增 `external_geocoder_enable_source`，可区分 `task_config_explicit`、`local_config_explicit`、`auto_credentials` 和 `disabled_no_credentials`。
+- 本地高确定性地区规则新增：`大马/大馬 -> MY`、`Belgique -> EUR`、`CZ/SK -> EUR`。
+- 支持从国旗 emoji 解析 ISO 国家代码，例如 `🇫🇷 -> FR`、`🇨🇿🇸🇰 -> EUR`。
+- 两到三位地区代码可在紧贴中文时命中，例如 `HK朋友交換群組 -> HK`。
 
-```bash
-python run.py --quality-price-config path/to/config.json
-```
+GeoNames 仍只在更高优先级的明确地区规则无法确定结果时调用。
 
-## Login
+## V5.0.1 GeoNames 修复说明
 
-需要人工登录或调试页面时使用可见浏览器：
-
-```bash
-python run.py --headed
-```
-
-也可以使用已保存的 Playwright 登录态：
-
-```bash
-python run.py --platform Redfinger --storage-state output/auth/redfinger_state.json
-```
-
-登录态必须留在 `output/auth/`，不要上传。
-
-## Output
-
-每次运行会创建：
+V5.0.1 修复了 V5.0.0 中 GeoNames 全部返回 `network_error` 的问题。GeoNames endpoint 现在默认使用：
 
 ```text
-output/cloud_phone_monitor_YYYYMMDD_HHMMSS/
-  products.csv
-  products.xlsx
-  products.jsonl
-  product_brief.txt
-  daily_changes.xlsx
-  baseline_products_updated.xlsx
-  quality_price_report.xlsx
-  run_summary.json
-  api_candidates.json
-  page_artifacts/
-    screenshots/
-    html/
-    api_responses/
+http://api.geonames.org/searchJSON
 ```
 
-`products.xlsx` 按平台分 sheet：UgPhone、VSPhone、Redfinger、LDCloud。
-
-`daily_changes.xlsx` 保留原有 baseline 变化，并新增 `UG相近配置价格对比`，该 sheet 使用相似度和质量调整逻辑，不再只按 CPU/内存/存储/时长完全一致匹配。
-
-`quality_price_report.xlsx` 包含：
-
-- `配置配对建议`：UgPhone 配置与竞品候选配置的相似度、配对来源和备注。
-- `质量调整价格明细`：30 天等效价、折扣率、质量调整系数、调整后价差。
-- `UG相对竞品指数`：UgPhone 相对核心竞品质量调整价中位数的指数。
-- `变价合理性判断`：当前与 baseline 的 30 天等效价、原价、折扣率、促销、地区、库存变化判断。
-- `说明`：核心指标和标签解释。
-
-## Local Dashboard
-
-本项目包含一个本地可查看的只读 Dashboard，目录在 `dashboard/`。它只读取 `dashboard/public/dashboard_data/*.json` 或 `output/latest/dashboard_data/*.json` 中的非敏感摘要数据，不读取 `output/auth/`，也不会暴露 cookie、token 或 Playwright storage state。
-
-Dashboard 本身不抓取数据，不提供 `Run Monitor`，也不会触发购买、下单、支付或订阅。每日数据更新应由系统级任务完成；手动采集请在命令行运行 `python run.py`。
-
-启动方式：
-
-```bash
-cd dashboard
-npm install
-npm run dev
-```
-
-默认会在本地 Vite 地址打开，例如：
+如需 HTTPS，可在配置中改为：
 
 ```text
-http://127.0.0.1:5173/
+https://secure.geonames.org/searchJSON
 ```
 
-当前 Dashboard 优先读取 `dashboard/public/dashboard_data/*.json` 中的前台业务 JSON，并在缺少静态数据时回退到本地 mock 数据。界面支持简体中文和 English 切换。
-
-页面结构：
-
-- `#/price-overview`：价格概览，只展示更新时间、基准配置数、核心天数、价格位置分布和关注项。
-- `#/pairing`：配置配对，说明 UgPhone 与 VSPhone / Redfinger / LDCloud 如何配对。
-- `#/duration-prices`：分天数价格对比，按 1/3/7/15/30/60/90/180/365 天分 tab 比较成交价。
-- `#/trends`：价格趋势，展示当前价、上次价、7日均价、30日均价和折线图。
-- `#/price-changes`：价格变化追踪，只追踪成交价变化，不使用原价或折扣率。
-- `#/product-text`：商品文本，展示当前/上次商品或活动文案。
-- `#/metrics`：指标说明，用通俗中文解释所有核心指标。
-
-后台诊断数据单独写入 `dashboard_data/admin_diagnostics.json`，前台页面不加载它。采集状态、登录状态、fallback、失败原因和内部路径只用于内部排查，不出现在业务看板。
-
-配对不是最终结论：不同平台套餐名含义不同，配对只用于证明某个竞品能否进入同天数核心竞品中位数。最终判断来自 `duration_price_comparison.json` 中的同购买天数成交价、`competitor_median_price`、`ugphone_relative_index`、`market_position_label` 和商品文本变化。
-
-## Daily Auto Update
-
-Dashboard 数据由每日自动任务更新，网页只重新加载已经生成的 `dashboard_data`。
-
-Windows Task Scheduler：
+不要使用 `https://api.geonames.org/searchJSON`。覆盖后建议删除旧 geocode cache：
 
 ```powershell
-powershell -ExecutionPolicy Bypass -File scripts/setup_daily_monitor_windows.ps1
+Get-ChildItem .\runs -Recurse -Filter "*geocode*cache*.json" | Remove-Item -Force
 ```
 
-默认创建任务：
+新增审计字段：`__geocoder_attempted_queries`、`__geocoder_endpoint`、`__geocoder_error_reason`。
+
+
+用于 Facebook 游戏群组两阶段监测的 Codex Skill。
+
+本项目按“先登录、再搜索、再详情采集”的流程运行，支持一次任务同时检索多个游戏。V5.3.0 支持后台启动流程：登录态验证、第一轮抓取和第二轮抓取都可在后台运行，启动命令会立即返回 PID 与日志路径，避免 Codex 前台命令占用聊天输入框。第二轮默认每 30 分钟刷新进度汇报，最终 Excel 报告生成后自动关闭 Chrome；系统关机默认关闭，只有用户明确要求“完成后关机”时才通过显式参数触发，并由独立 Node 监控器在锁屏状态下执行强制关机。V5.3.0 同时保留此前对蒙古语误判为俄语的修复。
+
+
+## GeoNames 外部地理解析兜底
+
+第二轮地区判断包含 GeoNames 外部验证兜底。它用于处理群组名称或 About/简介中只出现城市、省、州等细粒度地名的情况，例如 `Ulaanbaatar`、`Cebu`、`California` 这类旧版未必能通过固定词典识别的位置。
+
+调用逻辑是兜底式的：如果群名已经有明确国家/地区/大区，仍按原规则输出；只有原有链路无法确定地区时，才从群名和 About Location 中抽取疑似地名，调用 GeoNames 验证。通过验证后，GeoNames 返回的国家代码会映射为 Skill 的 `region`。歧义、低置信度、超时和无结果都不会中断采集。
+
+GeoNames 用户名放在 `config/local/geonames.local.json`，根目录 `.gitignore` 已默认忽略 `config/local/*.json`，该文件不建议上传 GitHub。
+
+## 核心能力
+
+- 第一阶段按每个游戏独立生成搜索计划。
+- 自动搜索低风险变体：原始标题、标点归一、冒号/破折号归一、少空格/去空格紧凑标题。
+- `connector_x` 默认关闭，只能通过 `title_variant_overrides` 配置开启。
+- `seed_group_urls` 可把已知重要群组强制送入第二轮检查，但不会自动进入最终结果。
+- 第二阶段进入群组详情页，采集成员规模、今日发帖、上周新增、是否上月已存在等指标。
+- 多游戏批量检索时，自动把同批次其他游戏作为兄弟标题排斥。
+- 弱相关、仅词根命中、全文命中等记录只有在成员规模和活跃度达标后才进入人工复核 sheet，不混入最终明细。
+- 默认全球监测，不按语言或地区硬过滤；语言和地区只作为展示与分析字段。
+- 语言判断以讨论区前五条可见玩家发言为主，群组名称为辅助。
+- “关于这个小组”只在存在用户手写的非 UI 内容时作为最低优先级兜底。
+- 地区判断优先看群组名称中的明确地区语义；群名同时出现多个不同地区证据时先读取 About 所在地裁决，只有 About 无法裁决时，同一业务大区的多国家/地区组合才回退到该大区。
+- 当群名与允许的语言兜底仍无法确定地区时，读取 About 页中明确标注的“所在地 / Location”字段；国家/地区优先，已配置的高确定性城市次之。
+- Excel 输出固定列顺序，`snapshot_date` 和 `group_id` 强制文本格式，活跃指数/规模增速为百分比公式。
+- 后台启动后会立即返回 PID 与日志路径；第二轮默认每 30 分钟输出一次 `codex_progress_report`，并刷新 `codex_progress_report.json`。
+- 可选“完成后关机”：默认不启用。启用后会在最终报表生成并确认 Chrome 已关闭后，启动独立 Node 监控器；该监控器等待第二轮进程退出、核验结果文件，再执行 `shutdown.exe /s /f /t <秒数>`。
+
+## 变体规则
+
+自动启用：
+
+- `canonical`：原始标题。
+- `punctuation_normalized`：标点、冒号、破折号归一。
+- `compact_spacing`：少空格/去空格紧凑标题，例如 `Allstar TowerDefense`。
+
+必须配置后才启用：
+
+- `connector_x`：例如 `All Star X Tower Defense`。
+- `seed_group_urls`：例如指定已知大群 URL。
+
+配置示例：
+
+```json
+{
+  "title_variant_overrides": {
+    "All Star Tower Defense": {
+      "search_variants": [
+        {
+          "query": "All Star X Tower Defense",
+          "type": "connector_x",
+          "min_group_size": 1000,
+          "min_today_posts": 20,
+          "min_week_new_fans": 50
+        }
+      ],
+      "seed_group_urls": [
+        "https://www.facebook.com/groups/1992312010946763",
+        "https://www.facebook.com/groups/allstarshinobi"
+      ]
+    }
+  }
+}
+```
+
+
+## Codex 后台运行与进度汇报
+
+建议在 Codex 中使用后台启动脚本，不要直接前台运行长抓取命令：
+
+```powershell
+# 打开 Chrome 登录窗口
+npm run login:bg
+
+# 用户登录后，后台验证登录态
+npm run validate-login:bg -- -RunDir ".\runs\demo"
+
+# 后台第一轮
+npm run phase1:bg -- -Games "All Star Tower Defense" -RunDir ".\runs\demo" -Config ".\runs\demo\task_config.json"
+
+# 后台第二轮；默认 30 分钟刷新/输出一次 codex_progress_report，完成后自动关闭 Chrome
+npm run phase2:bg -- -Index ".\runs\demo\phase1_index.json" -RunDir ".\runs\demo" -Config ".\runs\demo\task_config.json"
+
+# 只有用户明确要求“完成后关机”时，才加入这个开关；默认不要加
+npm run phase2:bg -- -Index ".\runs\demo\phase1_index.json" -RunDir ".\runs\demo" -Config ".\runs\demo\task_config.json" -ShutdownAfterComplete -ShutdownDelaySeconds 60
+```
+
+后台启动脚本会立即返回：
+
+- `pid`：后台进程 ID。
+- `run_dir`：当前输出目录。
+- `stdout_log` / `stderr_log`：后台日志。
+- `codex_progress_report.json`：Codex 进度快照。
+- `background_task.json`：本次后台任务元信息。
+- `codex_task_complete.json`：第二轮完成状态；若启用关机，会记录独立关机监控器信息。
+- `conditional_shutdown_watcher_status.json`：关机监控器状态，包括最终 Excel 校验和强制关机命令是否已发出。
+
+查看状态：
+
+```powershell
+npm run status:bg -- -RunDir ".\runs\demo"
+```
+
+第二轮默认每 30 分钟输出一次 `codex_progress_report` 并刷新 `codex_progress_report.json`。输出 JSON 中的 `message` 字段是中文进度摘要，可直接发给用户。
+
+可通过命令行、配置或环境变量调整间隔：
+
+```powershell
+node .\scripts\phase2_collect_details.js --index ".\runs\demo\phase1_index.json" --progress-report-every-minutes 30
+```
+
+```json
+{
+  "progress_report_every_minutes": 30,
+  "close_chrome_after_report": true,
+  "shutdown_after_complete": false,
+  "shutdown_delay_seconds": 60
+}
+```
+
+设为 `0` 可关闭定时汇报。第二轮最终 Excel 报告生成后默认自动关闭 Chrome；如需保留浏览器，加 `--no-close-chrome true`，或在配置中设置 `"close_chrome_after_report": false`。
+
+自动关机默认关闭。只有当用户在提示词中明确要求“完成后关机 / 跑完关机”时，Codex 才能使用 `-ShutdownAfterComplete` 或 `--shutdown-after-complete true`。触发后，第二轮会先写入最终报表并确认 Chrome 已关闭，再启动独立 Node 关机监控器。监控器在第二轮 Node 进程退出后核验 Excel 与完成状态，随后执行：`shutdown.exe /s /f /t <秒数> /d p:0:0 /c "..."`。`/f` 会强制关闭阻塞应用，监控器在锁屏状态下仍会运行；默认延迟 60 秒，期间可用 `shutdown.exe /a` 取消。若监控器启动失败，第二轮脚本会直接发送相同的带 `/f` 强制关机命令作为回退。
+
+## 输出文件
+
+第二阶段最终生成；完整 Excel 报告写入成功后，默认通过 Chrome CDP 自动关闭采集浏览器：
+
+- `fb_monitoring_filtered.xlsx`
+- `fb_monitoring_filtered_summary.json`
+- `collision_report.json`
+- `audit_stats.json`
+- `debug_rows.json`
+
+第二阶段运行中会即时生成/刷新：
+
+- `codex_progress_report.json`: Codex 定时进度快照，第二轮默认每 30 分钟刷新一次，并向 stdout 日志输出 `codex_progress_report`。
+- `phase2_progress.json`: 轻量进度文件，每处理 1 个候选刷新一次；用于观察当前跑到哪个游戏/第几个候选。
+- `phase2_autosave_state.json`: 完整恢复状态；在阶段开始、游戏边界、每条命中有效行、异常退出前刷新，包含已通过筛选的 `staged_rows`、人工复核行和统计。
+- `phase2_autosave_summary.json`: 当前局部摘要，保持兼容旧观察命令。
+- `partial_verified_rows.xlsx`: 已通过筛选行的可读暂存表；启动时先创建表头，每命中 1 条有效群组就立即保存。
+- `phase2_autosave_last_error.txt`: 仅当暂存 Excel 写入失败时出现；通常是文件被 Excel 打开占用。
+- `codex_task_complete.json`: 第二轮最终状态文件，记录完整报表是否生成、Chrome 是否关闭、是否请求关机及独立关机监控器信息。
+- `conditional_shutdown_watcher_status.json`: 仅启用完成后关机时生成；记录第二轮退出后的文件校验与强制关机结果。
+
+Excel 工作簿包含：
+
+- `detail`: 严格通过的最终明细。
+- `manual_review`: 已通过成员规模与活跃度门槛、但相关性仍需人工判断的队列。
+
+不再生成任何独立 CSV 明细或人工复核队列文件。
+
+## Excel 明细列
 
 ```text
-CloudPhoneMonitorDaily
+snapshot_date,region,language,game_name,group_name,group_url,group_id,group_size,today_posts,week_new_fans,活跃指数=当日新帖/社群规模,规模增速=上周新增/(社群规模-上周新增）,existed_last_month,is_relevant,action,action_reason,risk_level,__region_source,__region_keyword_hits
 ```
 
-默认每个工作日 10:00 在当前 skill 根目录运行：
+Excel 格式规则：
 
-```bash
-python run.py
+- `snapshot_date` 写为文本，例如 `2026-05-06`。
+- `group_id` 写为文本，避免长数字变成科学计数法。
+- `活跃指数=当日新帖/社群规模` 使用公式 `=IFERROR(Ix/Hx,"")`。
+- `规模增速=上周新增/(社群规模-上周新增）` 使用公式 `=IFERROR(Jx/(Hx-Jx),"")`。
+- 两个公式列均为百分比格式，保留 2 位小数。
+
+## 语言与地区规则
+
+语言判断优先级：
+
+1. 讨论区前五条可见玩家发言。
+2. 群组名称。
+3. 用户手写的“关于这个小组”非 UI 文本。
+
+不得把 Facebook 界面语言、按钮、导航、固定结构文案、空 about 区块结构文字当作语言证据。若前五条可见帖子是无正文的图片/视频帖，或正文极短且只能抓到“成员、帖子、刚刚、查看更多、最相关、评论、分享、查看翻译”等界面文案，则该帖不计入语言证据；证据不足时返回 `Unknown`，不得默认判为 `Chinese`。
+
+蒙古语与俄语都使用西里尔字母，因此不能将任意西里尔文本直接判为俄语。出现蒙古语特有字母 `Ө/ө`、`Ү/ү` 时，优先判为 `Mongolian`；不含这两个字母的短句会再通过“`сайн байна`、`байна уу`、`баярлалаа`、`тоглоом`、`тоглогч`、`зарна`、`авна`、`солно`”等高确定性蒙古语词组识别。只有不存在上述蒙古语证据的通用西里尔文本，才回退为 `Russian`。群名中的 `Mongolia` / `Mongolian` 仍只用于地区识别，不会单独把语言判为蒙古语。
+
+地区判断优先级：
+
+1. 群组名称里的明确国家、地区、属地或大区语义。
+2. 若命中多个国家/地区，但都属于同一业务大区，则输出该大区。例如 `MY + SG`、`TH + VN` 输出 `SEA`；`HK + TW` 输出 `EA`；`DE + FR` 输出 `EUR`。
+3. 若命中多个跨业务大区信号，则视为地区冲突并留空。例如 `UAE + PH`、`US + BR`、`JP + TH`。
+4. 未命中群名地区语义时，才使用高确定性语言辅助映射，例如 Thai -> TH、Vietnamese -> VN、Indonesian -> ID、Malay -> MY、Filipino -> PH、Arabic/Persian -> Middle East。
+5. 若前四步仍无法确定，才从 About 页中明确标注的“所在地 / Location”字段推断地区：先识别国家/地区，再识别 `about_location_city_keywords` 中配置的高确定性城市；该兜底不得覆盖前述已得到的地区结果。
+6. 无法确定时留空。
+
+单一国家/地区命中时，东亚与东南亚仍按自身输出；Middle East、Central Asia、South Asia、North America、LATAM、Africa、EUR、Oceania 按业务大区归并；BR 单列；TR、NL、DE、FR、IT、PL、RU 单列。
+
+English、Spanish、Chinese、French、Portuguese、Mixed 等语言只作为语言展示，不单独强制映射国家地区。Arabic / Persian 只在国家未知时辅助归入 `Middle East`；若明确识别到非洲国家，则优先输出 `Africa`，Egypt 例外归入 `Middle East`。
+
+## 使用方法
+
+安装依赖：
+
+```powershell
+npm install
 ```
 
-日志写入：
+打开 Chrome 并手动登录 Facebook：
 
-```text
-output/scheduler_logs/
+```powershell
+npm run login:bg
 ```
 
-macOS/Linux cron 示例：
+用户完成登录后验证登录态：
 
-```bash
-bash scripts/setup_daily_monitor_cron.sh
+```powershell
+npm run validate-login:bg -- -RunDir ".\runs\demo"
 ```
 
-脚本会输出 crontab 示例；请审阅后手动加入 `crontab -e`。
+第一阶段后台运行：
 
-手动运行一次采集：
-
-```bash
-python run.py
+```powershell
+npm run phase1:bg -- -Games "All Star Tower Defense" -RunDir ".\runs\demo" -Config ".\runs\demo\task_config.json" -Cdp "http://127.0.0.1:9222"
 ```
 
-调度状态会导出到后台/状态 JSON：
+第二阶段后台运行：
 
-```text
-output/latest/dashboard_data/schedule_status.json
-dashboard/public/dashboard_data/schedule_status.json
+```powershell
+npm run phase2:bg -- -Index ".\runs\demo\phase1_index.json" -RunDir ".\runs\demo" -Config ".\runs\demo\task_config.json" -Cdp "http://127.0.0.1:9222"
 ```
 
-如果超过 30 小时未更新，Dashboard 显示 warning；超过 48 小时显示 critical/outdated。
+第二阶段默认采用更轻的即时保存方式：
 
-## Core Metrics
+- 每处理 1 个候选，刷新 `phase2_progress.json` 和 `phase2_autosave_summary.json`，不重写 xlsx。
+- 只有当某个群组通过全部筛选并进入有效结果时，才立刻刷新 `partial_verified_rows.xlsx` 和完整 `phase2_autosave_state.json`。
+- 这样既保留断点进度，又避免“每个候选都重写完整 Excel”的额外开销。
 
-- `current_price`：当前成交价。
-- `previous_price`：上一次成功采集的同商品同天数成交价。
-- `baseline_price`：baseline 对应商品和购买天数的成交价。
-- `price_change_pct`：当前价相对上次价的变化比例。
-- `seven_day_avg_price` / `thirty_day_avg_price`：历史样本均价；样本不足时只作辅助参考。
-- `config_similarity_score` / `comparability_level`：配置相似度和配对等级。
-- `competitor_median_price`：同购买天数下 strong/adjusted 竞品当前价中位数。
-- `ugphone_relative_index`：UgPhone 当前价 / 竞品中位价 * 100。
-- `promotion_text_changed`：商品/活动文本是否变化。
-- `reason_code`：基于现价和文本变化判断，如 `price_up`、`price_down`、`promotion_text_changed`、`short_duration_excluded`。
-- `alert_level`：`critical`、`warning`、`info`、`none`。
+如果中途断电、Ctrl+C、浏览器崩溃或脚本报错，不要删除 run 目录，直接用自动保存状态恢复当前已跑出的结果：
 
-前台核心价格比较只使用这些购买天数：
-
-```text
-1 / 3 / 7 / 15 / 30 / 60 / 90 / 180 / 365
+```powershell
+node .\scripts\finalize_partial_xlsx.js --dir ".\runs\demo" --snapshot-date "2026-05-12"
 ```
 
-4 小时、45 天、120 天、活动组合包、多设备包等非核心周期会标记为 `duration_bucket = other`；1/3/15/60 天会作为独立核心购买天数展示。
+恢复脚本优先读取 `phase2_autosave_state.json`；如果没有该文件，才回退读取 `partial_verified_rows.xlsx`。`phase2_progress.json` 主要用于观察进度，不直接作为最终 Excel 的数据源。
 
-## Why Not Compare Package Names Directly
+一键流程也可以后台运行：
 
-不同平台的 VIP、KVIP、SVIP、XVIP 含义不同，同名套餐可能配置不同，不同名套餐也可能配置接近。套餐名只作为手工推荐配对的线索，核心比较使用配置相似度和质量调整价。
+```powershell
+npm run monitor:bg -- -Games "Anime Guardians,Anime Last Stand,Anime Overload,Anime Rangers X,Anime Tactical Simulator,Anime Vanguards" -RunDir ".\runs\demo" -Config ".\runs\demo\task_config.json"
+```
 
-## Important Fields
+## 仓库结构
 
-| Field | Meaning |
-|---|---|
-| platform | UgPhone / VSPhone / Redfinger / LDCloud |
-| supported_server_regions | 该商品支持的全部服务器地区 |
-| product_model | 套餐或 SKU，例如 UVIP / KVIP / SVIP / XVIP |
-| device_model | 设备机型或平台内部型号 |
-| android_version | 安卓版本；无法确认时留空 |
-| cpu | CPU 核心数 |
-| ram | 内存 |
-| storage | 存储 |
-| price | 当前实付价 |
-| original_price | 页面/API 暴露的原价 |
-| duration | 购买时长 |
-| promotion_text | 活动文案 |
-| stock_status | 库存状态 |
+- `SKILL.md`: Codex Skill 工作流说明。
+- `scripts/`: 登录、第一阶段、第二阶段脚本。
+- `references/`: 判定规则、Excel schema、质量检查清单。
+- `assets/`: 配置模板。
+- `agents/`: 可选 agent 配置。
+- `package.json`: Node.js 依赖与命令。
 
-## Upload To GitHub
+## GitHub 上传清单
 
-建议上传源码和文档：
+建议上传：
 
 - `SKILL.md`
 - `README.md`
-- `requirements.txt`
-- `config.example.json`
-- `install_windows.ps1`
-- `run.py`
-- `run_windows.bat`
+- `agents/`
 - `scripts/`
-- `cloud_phone_monitor/`
-- `dashboard/`
+- `references/`
+- `assets/`
+- `package.json`
+- `package-lock.json`
 - `.gitignore`
 
 不要上传：
 
-- `output/`
-- `output/auth/`
-- `baselines/*.xlsx`
-- `page_artifacts/`
-- `__pycache__/`
-- `*.pyc`
-- `dashboard/node_modules/`
-- `dashboard/dist/`
-- 任何登录态、Cookie、Token、账号信息或私有价格基准文件
+- `node_modules/`
+- `runs/`
+- Facebook 输出结果文件
+- 浏览器缓存、Cookie、登录态、截图、临时文件
 
+## 隐私说明
 
-
-## Redfinger price-SKU integrity
-
-Redfinger 的价格 SKU 必须来自已登录购买页的 `getGoods` 接口，或来自同时含有**价格**与**时长**的可见套餐卡片。采集流程会依次选择套餐、Android 版本和服务器；游戏推荐、钱包余额、导航文字、加载骨架和套餐标签仅保留为诊断证据，不会再写入 `products.xlsx`。
-
-如 Redfinger 未采集到有效价格 SKU，请查看本次输出中的：
-
-```text
-page_artifacts/redfinger_price_diagnostic.json
-page_artifacts/screenshots/
-page_artifacts/api_responses/
-```
-
-这种情况不应手工发布看板构建产物。
-
-
-## 2026-07-02 诊断与发布可靠性修复
-
-- 页面截图与 HTML 证据文件改用受控短路径和哈希文件名；保存失败时返回空路径并进入 Redfinger 组合级摘要。
-- Redfinger 每次采集输出 `page_artifacts/redfinger_collection_summary.json`，用于区分价格采集失败、组合覆盖不足和仅诊断附件失败。
-- 看板平台状态拆分为 `collection_status` 与 `baseline_coverage_status`；旧的 `status` 保持与真实采集状态一致。
-- 自动发布脚本不会再因上一轮的产品数量异常阻断下一轮采集，但仍会阻断登录、会话、验证码、反爬与 401/403 等认证/访问问题。
-- 发布前自动将 Git `origin` 更新为 `Nikolaustis/Cloud-Phone-Price-Dashboard-Site`，并推送当前分支。
+本项目不应包含 Facebook 账号、Cookie、token 或任何登录态文件。所有采集都应通过用户手动登录的浏览器会话执行。

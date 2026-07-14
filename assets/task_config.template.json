@@ -1,0 +1,587 @@
+{
+  "games": [
+    "LINE Rangers",
+    "sealm on cross"
+  ],
+  "aliases": {
+    "LINE Rangers": [],
+    "sealm on cross": []
+  },
+  "sibling_titles": {
+    "LINE Rangers": [],
+    "sealm on cross": []
+  },
+  "ip_roots": {
+    "LINE Rangers": [
+      "LINE"
+    ],
+    "sealm on cross": [
+      "sealm"
+    ]
+  },
+  "threshold": 10,
+  "progress_report_every_minutes": 30,
+  "allowed_language_signals": [],
+  "allowed_regions": [],
+  "language_to_region": {
+    "Thai": "TH",
+    "Vietnamese": "VN",
+    "Indonesian": "ID",
+    "Malay": "MY",
+    "Filipino": "PH",
+    "Lao": "LA",
+    "Khmer": "KH",
+    "Burmese": "MM",
+    "Arabic": "Middle East",
+    "Persian": "Middle East",
+    "Chinese": "",
+    "English": "",
+    "Spanish": "",
+    "Portuguese": "",
+    "Japanese": "",
+    "Korean": "",
+    "French": "",
+    "German": "",
+    "Mongolian": "",
+    "Russian": "",
+    "Turkish": "",
+    "Hindi": "",
+    "Mixed": "",
+    "Unknown": ""
+  },
+  "region_keywords": {
+    "CN": [
+      "cn",
+      "china",
+      "mainland china",
+      "中国大陆",
+      "中国"
+    ],
+    "HK": [
+      "hk",
+      "hong kong",
+      "香港"
+    ],
+    "MO": [
+      "mo",
+      "macau",
+      "macao",
+      "澳门",
+      "澳門"
+    ],
+    "TW": [
+      "tw",
+      "taiwan",
+      "台湾",
+      "台灣"
+    ],
+    "JP": [
+      "jp",
+      "japan",
+      "japanese",
+      "日本"
+    ],
+    "KR": [
+      "kr",
+      "south korea",
+      "korean",
+      "한국"
+    ],
+    "KP": [
+      "kp",
+      "north korea",
+      "dprk"
+    ],
+    "MN": [
+      "mn",
+      "mongolia"
+    ],
+    "TH": [
+      "th",
+      "thai",
+      "thailand"
+    ],
+    "VN": [
+      "vn",
+      "viet nam",
+      "vietnam",
+      "việt nam"
+    ],
+    "PH": [
+      "ph",
+      "pinoy",
+      "philippines",
+      "pilipinas"
+    ],
+    "ID": [
+      "indo",
+      "indonesia"
+    ],
+    "MY": [
+      "malaysia",
+      "malay",
+      "大马",
+      "大馬",
+      "马来西亚",
+      "馬來西亞"
+    ],
+    "SG": [
+      "sg",
+      "singapore"
+    ],
+    "BN": [
+      "brunei"
+    ],
+    "LA": [
+      "laos",
+      "lao"
+    ],
+    "KH": [
+      "cambodia",
+      "khmer"
+    ],
+    "MM": [
+      "myanmar",
+      "burma",
+      "burmese"
+    ],
+    "TL": [
+      "timor leste",
+      "east timor"
+    ],
+    "Middle East": [
+      "saudi arabia",
+      "ksa",
+      "saudi",
+      "uae",
+      "united arab emirates",
+      "qatar",
+      "kuwait",
+      "bahrain",
+      "oman",
+      "yemen",
+      "iraq",
+      "iran",
+      "persia",
+      "israel",
+      "jordan",
+      "lebanon",
+      "syria",
+      "palestine",
+      "egypt",
+      "middle east",
+      "mena",
+      "gcc",
+      "arabic"
+    ],
+    "Central Asia": [
+      "kazakhstan",
+      "kyrgyzstan",
+      "tajikistan",
+      "turkmenistan",
+      "uzbekistan"
+    ],
+    "South Asia": [
+      "india",
+      "bharat",
+      "pakistan",
+      "bangladesh",
+      "sri lanka",
+      "nepal",
+      "bhutan",
+      "maldives",
+      "afghanistan"
+    ],
+    "North America": [
+      "usa",
+      "u.s.",
+      "u.s.a.",
+      "united states",
+      "canada",
+      "greenland",
+      "quebec",
+      "québec"
+    ],
+    "LATAM": [
+      "mexico",
+      "méxico",
+      "argentina",
+      "chile",
+      "colombia",
+      "peru",
+      "uruguay",
+      "paraguay",
+      "bolivia",
+      "ecuador",
+      "venezuela",
+      "puerto rico",
+      "us virgin islands",
+      "guadeloupe",
+      "martinique",
+      "french guiana",
+      "aruba",
+      "curaçao",
+      "curacao"
+    ],
+    "BR": [
+      "br",
+      "brasil",
+      "brazil"
+    ],
+    "Africa": [
+      "south africa",
+      "nigeria",
+      "kenya",
+      "ghana",
+      "ethiopia",
+      "morocco",
+      "algeria",
+      "tunisia",
+      "sudan",
+      "libya"
+    ],
+    "TR": [
+      "turkey",
+      "turkiye",
+      "türkiye",
+      "turkish"
+    ],
+    "NL": [
+      "netherlands",
+      "holland",
+      "dutch",
+      "nederland"
+    ],
+    "DE": [
+      "germany",
+      "deutschland",
+      "german",
+      "deutsch"
+    ],
+    "FR": [
+      "france",
+      "french",
+      "français",
+      "francais"
+    ],
+    "IT": [
+      "italy",
+      "italia",
+      "italian",
+      "italiano"
+    ],
+    "PL": [
+      "poland",
+      "polska",
+      "polish",
+      "polski",
+      "trójmiasto",
+      "trojmiasto"
+    ],
+    "RU": [
+      "russia",
+      "russian"
+    ],
+    "EUR": [
+      "united kingdom",
+      "uk",
+      "spain",
+      "portugal",
+      "sweden",
+      "norway",
+      "finland",
+      "denmark",
+      "belgium",
+      "switzerland",
+      "austria",
+      "greece",
+      "ukraine",
+      "georgia",
+      "armenia",
+      "azerbaijan",
+      "cyprus",
+      "belgique",
+      "belgien",
+      "czech",
+      "česko",
+      "cesko",
+      "cz",
+      "slovak",
+      "slovensko",
+      "sk",
+      "cz/sk",
+      "danmark",
+      "sverige",
+      "schweiz"
+    ],
+    "Oceania": [
+      "australia",
+      "new zealand",
+      "papua new guinea",
+      "fiji",
+      "samoa",
+      "tonga",
+      "vanuatu",
+      "solomon islands",
+      "micronesia",
+      "palau",
+      "marshall islands",
+      "kiribati",
+      "nauru",
+      "tuvalu",
+      "guam",
+      "new caledonia",
+      "french polynesia"
+    ]
+  },
+  "cdp_url": "http://127.0.0.1:9222",
+  "close_chrome_after_report": true,
+  "shutdown_after_complete": false,
+  "shutdown_delay_seconds": 60,
+  "snapshot_date": "YYYY-MM-DD",
+  "title_variant_overrides": {
+    "All Star Tower Defense": {
+      "search_variants": [
+        {
+          "query": "All Star X Tower Defense",
+          "type": "connector_x",
+          "min_group_size": 1000,
+          "min_today_posts": 20,
+          "min_week_new_fans": 50
+        }
+      ],
+      "seed_group_urls": [
+        "https://www.facebook.com/groups/1992312010946763",
+        "https://www.facebook.com/groups/allstarshinobi"
+      ]
+    }
+  },
+  "direct_region_keywords": {
+    "EA": [
+      "east asia",
+      "eastern asia",
+      "east asian",
+      "东亚",
+      "東亞"
+    ],
+    "SEA": [
+      "southeast asia",
+      "south east asia",
+      "south-east asia",
+      "asean",
+      "s.e.a.",
+      "sea server",
+      "sea players",
+      "sea region"
+    ],
+    "Middle East": [
+      "middle east",
+      "mena",
+      "gcc",
+      "gulf countries",
+      "arab countries",
+      "arab world",
+      "arabic"
+    ],
+    "Central Asia": [
+      "central asia",
+      "central asian"
+    ],
+    "South Asia": [
+      "south asia",
+      "south asian"
+    ],
+    "North America": [
+      "north america",
+      "north american"
+    ],
+    "LATAM": [
+      "latam",
+      "latin america",
+      "latinoamerica",
+      "latinoamérica",
+      "america latina",
+      "américa latina"
+    ],
+    "Africa": [
+      "africa",
+      "african"
+    ],
+    "EUR": [
+      "europe",
+      "european",
+      "eur"
+    ],
+    "Oceania": [
+      "oceania",
+      "pacific islands"
+    ]
+  },
+  "about_location_city_keywords": {
+    "TH": [
+      "bangkok",
+      "chiang mai",
+      "pattaya",
+      "phuket"
+    ],
+    "VN": [
+      "hanoi",
+      "ho chi minh city",
+      "saigon",
+      "da nang"
+    ],
+    "PH": [
+      "manila",
+      "quezon city",
+      "cebu city",
+      "davao city",
+      "pampanga"
+    ],
+    "ID": [
+      "jakarta",
+      "surabaya",
+      "bandung"
+    ],
+    "MY": [
+      "kuala lumpur",
+      "johor bahru",
+      "penang"
+    ],
+    "SG": [
+      "singapore"
+    ],
+    "JP": [
+      "tokyo",
+      "osaka"
+    ],
+    "KR": [
+      "seoul",
+      "busan"
+    ],
+    "CN": [
+      "beijing",
+      "shanghai",
+      "guangzhou",
+      "shenzhen"
+    ],
+    "HK": [
+      "hong kong"
+    ],
+    "TW": [
+      "taipei",
+      "kaohsiung",
+      "tainan",
+      "台南",
+      "臺南",
+      "hsinchu",
+      "新竹",
+      "taoyuan",
+      "桃園",
+      "桃园",
+      "keelung",
+      "基隆",
+      "chiayi",
+      "嘉義",
+      "嘉义"
+    ],
+    "Middle East": [
+      "riyadh",
+      "dubai",
+      "abu dhabi",
+      "doha",
+      "tehran",
+      "cairo"
+    ],
+    "South Asia": [
+      "new delhi",
+      "mumbai",
+      "karachi",
+      "dhaka",
+      "colombo"
+    ],
+    "North America": [
+      "new york",
+      "los angeles",
+      "toronto",
+      "vancouver",
+      "quebec",
+      "québec",
+      "quebec city",
+      "québec city",
+      "socal",
+      "southern california"
+    ],
+    "LATAM": [
+      "mexico city",
+      "buenos aires",
+      "santiago",
+      "bogota",
+      "lima",
+      "cdmx",
+      "ciudad de mexico",
+      "ciudad de méxico"
+    ],
+    "BR": [
+      "sao paulo",
+      "rio de janeiro",
+      "brasilia"
+    ],
+    "Africa": [
+      "lagos",
+      "nairobi",
+      "accra",
+      "johannesburg",
+      "cape town"
+    ],
+    "TR": [
+      "istanbul",
+      "ankara"
+    ],
+    "DE": [
+      "berlin",
+      "munich",
+      "hamburg"
+    ],
+    "FR": [
+      "paris",
+      "marseille",
+      "lyon"
+    ],
+    "EUR": [
+      "london",
+      "madrid",
+      "lisbon",
+      "stockholm",
+      "dublin"
+    ],
+    "Oceania": [
+      "sydney",
+      "melbourne",
+      "auckland",
+      "wellington"
+    ],
+    "PL": [
+      "trójmiasto",
+      "trojmiasto"
+    ]
+  },
+  "external_geocoder": {
+    "enabled": true,
+    "provider": "geonames",
+    "local_config_file": "config/local/geonames.local.json",
+    "username_env": "GEONAMES_USERNAME",
+    "only_when_region_empty": true,
+    "sources": [
+      "group_name",
+      "about_location"
+    ],
+    "max_queries_per_group": 4,
+    "max_rows": 5,
+    "min_confidence": 0.75,
+    "ambiguity_margin": 0.04,
+    "timeout_ms": 8000,
+    "rate_limit_ms": 1200,
+    "cache_file": "runs/geocode_cache.json",
+    "endpoint": "http://api.geonames.org/searchJSON"
+  }
+}
