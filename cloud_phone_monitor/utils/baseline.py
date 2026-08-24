@@ -857,8 +857,13 @@ def build_baseline_with_current_overlay(baseline_df: pd.DataFrame, current_df: p
                 if col in out and not missing(value):
                     out[col] = value
             out["notes"] = append_overlay_note(out.get("notes"), "current_price_overlay_applied")
+            out["current_observation_status"] = "observed_current_run"
         else:
+            # Preserve the baseline row for quality-comparison diagnostics only.
+            # Downstream consumers must not interpret its price as a current-day
+            # observation.
             out["notes"] = append_overlay_note(out.get("notes"), "current_missing_used_baseline")
+            out["current_observation_status"] = "missing_current_run"
         rows.append(out)
         seen.add(key)
 
@@ -868,6 +873,7 @@ def build_baseline_with_current_overlay(baseline_df: pd.DataFrame, current_df: p
             continue
         out = {col: row.get(col) for col in row.index if not col.startswith("_")}
         out["notes"] = append_overlay_note(out.get("notes"), "new_current_product_not_in_baseline")
+        out["current_observation_status"] = "observed_current_run"
         rows.append(out)
 
     return pd.DataFrame(rows)

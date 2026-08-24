@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import json
 import math
 import re
@@ -33,6 +34,7 @@ DASHBOARD_JSON_FILES = [
     "metric_definitions.json",
     "schedule_status.json",
     "meta.json",
+    "current_price_snapshot.json",
 ]
 
 PRICE_TRENDS_CHUNK_DIR = "price_trends_chunks"
@@ -43,6 +45,8 @@ PRICE_TRENDS_DETAIL_CHUNK_TARGET_BYTES = 5 * 1024 * 1024
 
 
 SCHEDULER_CONFIG_PATH = Path("output") / "scheduler_logs" / "schedule_status.json"
+MANUAL_DASHBOARD_PRICE_CORRECTIONS_PATH = Path("config") / "dashboard_manual_price_corrections.json"
+_MANUAL_DASHBOARD_PRICE_CORRECTIONS_CACHE: list[dict[str, Any]] | None = None
 
 BASE_PLATFORM = "UgPhone"
 LEGACY_BASE_PLATFORM = "UG" + "Phone"
@@ -348,8 +352,25 @@ def normalize_display_text(value: Any) -> str:
 
 
 def json_safe(value: Any) -> Any:
+    """Convert pandas/numpy/container values into JSON-safe Python values.
+
+    Container handling must happen before ``pd.isna``.  Calling ``pd.isna`` on
+    a list or ndarray returns a boolean array, whose truth value is ambiguous.
+    """
     if value is None:
         return None
+    if isinstance(value, dict):
+        return {str(key): json_safe(item) for key, item in value.items()}
+    if isinstance(value, (list, tuple, set)):
+        return [json_safe(item) for item in value]
+    # numpy arrays / pandas extension arrays expose tolist().
+    if hasattr(value, "tolist") and not isinstance(value, (str, bytes)):
+        try:
+            converted = value.tolist()
+            if converted is not value:
+                return json_safe(converted)
+        except Exception:
+            pass
     if isinstance(value, float):
         if math.isnan(value) or math.isinf(value):
             return None
@@ -362,13 +383,19 @@ def json_safe(value: Any) -> Any:
         return str(value)
     # pandas/numpy scalar values are not JSON serializable by default.
     # Returning them unchanged from json.default can trigger "Circular reference detected".
-    if hasattr(value, "item") and not isinstance(value, (dict, list, tuple, set)):
+    if hasattr(value, "item"):
         try:
-            return json_safe(value.item())
+            converted = value.item()
+            if converted is not value:
+                return json_safe(converted)
         except Exception:
             pass
-    if pd.isna(value):
-        return None
+    try:
+        missing = pd.isna(value)
+        if isinstance(missing, bool) and missing:
+            return None
+    except Exception:
+        pass
     return value
 
 
@@ -897,6 +924,8 @@ def build_pairing_evidence_records(pairings: pd.DataFrame) -> list[dict[str, Any
 
 
 def best_worst_competitors(group: pd.DataFrame) -> tuple[dict[str, Any] | None, dict[str, Any] | None]:
+    if group is None or group.empty or "quality_adjusted_price_30d" not in group.columns:
+        return None, None
     usable = group[pd.to_numeric(group["quality_adjusted_price_30d"], errors="coerce").notna()].copy()
     if usable.empty:
         return None, None
@@ -950,7 +979,7 @@ def build_price_decision(relative_df: pd.DataFrame, details_df: pd.DataFrame) ->
         best, worst = best_worst_competitors(detail_group)
         parsed = parse_ug_config(ug_config)
         rank_prices = []
-        if not detail_group.empty:
+        if not detail_group.empty and "quality_adjusted_price_30d" in detail_group.columns:
             rank_prices = [
                 float(value)
                 for value in pd.to_numeric(detail_group["quality_adjusted_price_30d"], errors="coerce").dropna().tolist()
@@ -1113,6 +1142,7 @@ def build_platform_status(output_dir: Path, run_summary: dict[str, Any]) -> list
     products_path = output_dir / "products.xlsx"
     baseline_path = output_dir / "baseline_products_updated.xlsx"
     redfinger_summary_path = output_dir / "page_artifacts" / "redfinger_collection_summary.json"
+    ugphone_summary_path = output_dir / "page_artifacts" / "ugphone_collection_summary.json"
     product_counts = {}
     priced_product_counts = {}
     baseline_counts = {}
@@ -1121,11 +1151,19 @@ def build_platform_status(output_dir: Path, run_summary: dict[str, Any]) -> list
         product_counts = {sheet.replace("采集", ""): len(df.dropna(how="all")) for sheet, df in sheets.items()}
         for sheet, frame in sheets.items():
             data = frame.dropna(how="all").copy()
-            for column in ["price", "duration"]:
-                if column not in data.columns:
-                    data[column] = None
+            rename_map = {cn: en for cn, en in PRODUCT_COLS.items() if cn in data.columns}
+            if rename_map:
+                data = data.rename(columns=rename_map)
+            price_column = _find_column_case_insensitive(data, ["price", "价格", "当前价格", "成交价"])
+            duration_column = _find_column_case_insensitive(data, ["duration", "购买时长", "购买天数", "时长"])
+            if price_column is None:
+                data["price"] = None
+                price_column = "price"
+            if duration_column is None:
+                data["duration"] = None
+                duration_column = "duration"
             priced_product_counts[sheet.replace("采集", "")] = int(
-                (data["price"].notna() & data["duration"].notna()).sum()
+                (data[price_column].notna() & data[duration_column].notna()).sum()
             )
     if baseline_path.exists():
         sheets = pd.read_excel(baseline_path, sheet_name=None, dtype=object)
@@ -1137,6 +1175,7 @@ def build_platform_status(output_dir: Path, run_summary: dict[str, Any]) -> list
         baseline_counts["VSPhone"] = baseline_counts.get("VSPhone", 0)
 
     redfinger_summary = read_json(redfinger_summary_path) if redfinger_summary_path.exists() else {}
+    ugphone_summary = read_json(ugphone_summary_path) if ugphone_summary_path.exists() else {}
     rows = []
     raw_counts = run_summary.get("records_by_platform", {})
     blocked = run_summary.get("blocked_pages", {})
@@ -1163,6 +1202,8 @@ def build_platform_status(output_dir: Path, run_summary: dict[str, Any]) -> list
             collection_status = "failed"
         elif name == "Redfinger" and redfinger_summary:
             collection_status = str(redfinger_summary.get("collection_status") or "warning")
+        elif name == BASE_PLATFORM and ugphone_summary:
+            collection_status = str(ugphone_summary.get("collection_status") or "warning")
         else:
             collection_status = "ok"
 
@@ -1201,6 +1242,26 @@ def build_platform_status(output_dir: Path, run_summary: dict[str, Any]) -> list
                     "successful_price_combinations": redfinger_summary.get("successful_price_combinations"),
                     "price_api_coverage_ratio": redfinger_summary.get("price_api_coverage_ratio"),
                     "artifact_write_failures": redfinger_summary.get("artifact_write_failures", 0),
+                }
+            )
+        if name == BASE_PLATFORM and ugphone_summary:
+            row.update(
+                {
+                    "config_count": ugphone_summary.get("config_count"),
+                    "meal_list_requests": ugphone_summary.get("meal_list_requests"),
+                    "meal_list_success_count": ugphone_summary.get("meal_list_success_count"),
+                    "dom_ready": ugphone_summary.get("dom_ready"),
+                    "dom_price_card_count": ugphone_summary.get("dom_price_card_count"),
+                    "ugphone_failure_reason": ugphone_summary.get("failure_reason"),
+                    "coverage_complete": ugphone_summary.get("coverage_complete"),
+                    "coverage_status": ugphone_summary.get("coverage_status"),
+                    "dom_matrix_plan_targets": ugphone_summary.get("dom_matrix_plan_targets"),
+                    "dom_matrix_plan_successes": ugphone_summary.get("dom_matrix_plan_successes"),
+                    "dom_matrix_variant_targets": ugphone_summary.get("dom_matrix_variant_targets"),
+                    "dom_matrix_variant_successes": ugphone_summary.get("dom_matrix_variant_successes"),
+                    "dom_matrix_region_targets": ugphone_summary.get("dom_matrix_region_targets"),
+                    "dom_matrix_region_resolved": ugphone_summary.get("dom_matrix_region_resolved"),
+                    "coverage_note": ugphone_summary.get("coverage_note"),
                 }
             )
         rows.append(row)
@@ -1370,15 +1431,67 @@ def build_pairing_matrix(pairing_records: list[dict[str, Any]]) -> list[dict[str
     return list(grouped.values())
 
 
-def build_duration_price_comparison(details: pd.DataFrame) -> dict[str, Any]:
+def _snapshot_has_product_duration(
+    snapshot: dict[str, Any] | None,
+    *,
+    platform: Any,
+    product_model: Any,
+    duration_days: Any,
+    purchase_mode: Any = None,
+) -> bool:
+    """Return True only when the current products table contains this SKU family.
+
+    Dashboard "current" values must be anchored to the current run's products
+    table.  Matching here is deliberately product+duration based (rather than
+    exact Android/config) so a legitimate config reshuffle does not make an
+    otherwise present SKU look missing.
+    """
+    if not snapshot:
+        return False
+    platform_key = normalize_platform_name(platform)
+    product_key = normalize_series_product(product_model)
+    duration_key = parse_float_value(duration_days)
+    mode_key = normalize_purchase_mode(platform_key, purchase_mode)
+    if duration_key is None:
+        return False
+    for row in snapshot.get("rows") or []:
+        if normalize_platform_name(row.get("platform")) != platform_key:
+            continue
+        if normalize_series_product(row.get("product_model")) != product_key:
+            continue
+        candidate_days = parse_float_value(row.get("duration_days"))
+        if candidate_days is None or abs(float(candidate_days) - float(duration_key)) > 0.000001:
+            continue
+        if normalize_purchase_mode(platform_key, row.get("purchase_mode")) != mode_key:
+            continue
+        if parse_float_value(row.get("price")) is not None:
+            return True
+    return False
+
+
+def build_duration_price_comparison(
+    details: pd.DataFrame,
+    current_snapshot: dict[str, Any] | None = None,
+) -> dict[str, Any]:
     buckets: dict[str, list[dict[str, Any]]] = {str(bucket): [] for bucket in FRONTEND_CORE_BUCKETS}
     other_rows: list[dict[str, Any]] = []
     if details.empty:
         return {"core_buckets": FRONTEND_CORE_BUCKETS, "buckets": buckets, "other_rows": other_rows}
     for (ug_config, duration_days), group in details.groupby(["ug_config", "duration_days"], dropna=False, sort=False):
         info = parse_duration_info(f"{duration_days} day" if not pd.isna(duration_days) else "")
-        ug_price = reconstruct_price(group["ug_effective_price_30d"].dropna().iloc[0], duration_days) if "ug_effective_price_30d" in group and group["ug_effective_price_30d"].notna().any() else None
         parsed = split_config(ug_config)
+        ug_price = reconstruct_price(group["ug_effective_price_30d"].dropna().iloc[0], duration_days) if "ug_effective_price_30d" in group and group["ug_effective_price_30d"].notna().any() else None
+        ug_current_observed = True
+        if current_snapshot is not None:
+            ug_current_observed = _snapshot_has_product_duration(
+                current_snapshot,
+                platform=BASE_PLATFORM,
+                product_model=parsed["product_model"],
+                duration_days=duration_days,
+                purchase_mode=PURCHASE_MODE_SUBSCRIPTION,
+            )
+            if not ug_current_observed:
+                ug_price = None
         row = {
             "ug_config_id": public_config_id(ug_config),
             "ug_config": ug_config,
@@ -1389,6 +1502,8 @@ def build_duration_price_comparison(details: pd.DataFrame) -> dict[str, Any]:
             "ug_storage": parsed["storage"],
             **info,
             "ugphone_price": json_safe(ug_price),
+            "ugphone_current_observed": bool(ug_current_observed),
+            "ugphone_price_source": "current_products" if ug_current_observed and ug_price is not None else "missing_current_products",
             "has_price_change": False,
             "promotion_text_changed": False,
             "competitors": {},
@@ -1678,6 +1793,151 @@ def parse_float_value(value: Any) -> float | None:
     if math.isnan(number) or math.isinf(number):
         return None
     return number
+
+
+
+_VSPHONE_API_RESPONSE_CACHE: dict[str, dict[str, Any] | None] = {}
+
+
+def _existing_artifact_path(value: Any) -> Path | None:
+    for token in str(value or "").split(";"):
+        raw = token.strip()
+        if not raw:
+            continue
+        candidates = [Path(raw), Path(raw.replace("\\", "/"))]
+        for candidate in candidates:
+            if candidate.exists() and candidate.is_file():
+                return candidate
+    return None
+
+
+def _load_vsphone_api_response(value: Any) -> dict[str, Any] | None:
+    path = _existing_artifact_path(value)
+    if path is None:
+        return None
+    key = str(path.resolve())
+    if key in _VSPHONE_API_RESPONSE_CACHE:
+        return _VSPHONE_API_RESPONSE_CACHE[key]
+    try:
+        wrapper = json.loads(path.read_text(encoding="utf-8"))
+        payload = wrapper.get("response_json") if isinstance(wrapper, dict) else None
+        if not isinstance(payload, dict):
+            payload = wrapper if isinstance(wrapper, dict) else None
+    except Exception:
+        payload = None
+    _VSPHONE_API_RESPONSE_CACHE[key] = payload
+    return payload
+
+
+def _vsphone_source_config_name(row: Any) -> str:
+    notes = str(row.get("notes") if hasattr(row, "get") else "" or "")
+    match = re.search(r"source_config_name=([^;]+)", notes, flags=re.IGNORECASE)
+    if match:
+        return match.group(1).strip()
+    return str(row.get("product_model") if hasattr(row, "get") else "" or "").strip()
+
+
+def _vsphone_api_price_fields(row: Any) -> dict[str, float | None]:
+    result = {"currentPrice": None, "goodPrice": None, "oldGoodPrice": None}
+    payload = _load_vsphone_api_response(row.get("api_response_path") if hasattr(row, "get") else None)
+    data = payload.get("data") if isinstance(payload, dict) else None
+    configs = data.get("configs") if isinstance(data, dict) else None
+    target_name = normalize_token(_vsphone_source_config_name(row))
+    target_days = parse_duration_days(row.get("duration") if hasattr(row, "get") else None)
+    if isinstance(configs, list):
+        for config in configs:
+            if not isinstance(config, dict):
+                continue
+            if target_name and normalize_token(config.get("configName")) != target_name:
+                continue
+            for good_time in config.get("goodTimes") or []:
+                if not isinstance(good_time, dict):
+                    continue
+                if target_days is not None and parse_duration_days(good_time.get("showContent")) != target_days:
+                    continue
+                for key in result:
+                    result[key] = parse_float_value(good_time.get(key))
+                return result
+    return result
+
+
+def infer_vsphone_subscription_api_field(frame: pd.DataFrame) -> tuple[str, dict[str, Any]]:
+    """Use verified DOM-card rows to choose currentPrice or goodPrice per run."""
+    votes = {"currentPrice": 0, "goodPrice": 0}
+    evidence: list[dict[str, Any]] = []
+    if frame.empty:
+        return "currentPrice", {"votes": votes, "evidence": evidence}
+    for _, row in frame.iterrows():
+        if normalize_platform_name(row.get("platform")) != "VSPhone":
+            continue
+        if normalize_purchase_mode("VSPhone", row.get("purchase_mode")) != PURCHASE_MODE_SUBSCRIPTION:
+            continue
+        notes = str(row.get("notes") or "").lower()
+        if "visible_duration_card_price" not in notes:
+            continue
+        published = parse_float_value(row.get("price"))
+        fields = _vsphone_api_price_fields(row)
+        current = _vsphone_api_cents_to_price(fields.get("currentPrice"))
+        good = _vsphone_api_cents_to_price(fields.get("goodPrice"))
+        matched = None
+        if published is not None and current is not None and abs(published - current) < 0.000001:
+            votes["currentPrice"] += 1
+            matched = "currentPrice"
+        if published is not None and good is not None and abs(published - good) < 0.000001:
+            votes["goodPrice"] += 1
+            matched = "goodPrice" if matched is None else "both"
+        evidence.append({
+            "product_model": json_safe(row.get("product_model")),
+            "duration": json_safe(row.get("duration")),
+            "published_price": json_safe(published),
+            "currentPrice": json_safe(current),
+            "goodPrice": json_safe(good),
+            "matched": matched,
+        })
+    if votes["goodPrice"] > votes["currentPrice"]:
+        selected = "goodPrice"
+    elif votes["currentPrice"] > votes["goodPrice"]:
+        selected = "currentPrice"
+    elif votes["goodPrice"] > 0:
+        selected = "goodPrice"
+    else:
+        selected = "currentPrice"
+    return selected, {"votes": votes, "evidence": evidence[:50]}
+
+
+def _vsphone_api_cents_to_price(value: Any) -> float | None:
+    parsed = parse_float_value(value)
+    return round(parsed / 100.0, 6) if parsed is not None else None
+
+
+def authoritative_product_row_price(
+    row: Any,
+    *,
+    vsphone_subscription_api_field: str = "currentPrice",
+) -> tuple[float | None, str]:
+    published = parse_float_value(row.get("price") if hasattr(row, "get") else None)
+    platform = normalize_platform_name(row.get("platform") if hasattr(row, "get") else None)
+    purchase_mode = normalize_purchase_mode(
+        platform,
+        row.get("purchase_mode") if hasattr(row, "get") else None,
+    )
+    if platform != "VSPhone" or purchase_mode != PURCHASE_MODE_SUBSCRIPTION:
+        return published, "products_row_price"
+
+    notes = str(row.get("notes") if hasattr(row, "get") else "" or "").lower()
+    if "visible_duration_card_price" in notes:
+        return published, "visible_duration_card_price"
+
+    fields = _vsphone_api_price_fields(row)
+    selected_field = vsphone_subscription_api_field if vsphone_subscription_api_field in {"currentPrice", "goodPrice"} else "currentPrice"
+    selected = _vsphone_api_cents_to_price(fields.get(selected_field))
+    other_field = "goodPrice" if selected_field == "currentPrice" else "currentPrice"
+    fallback = _vsphone_api_cents_to_price(fields.get(other_field))
+    if selected is not None:
+        return selected, f"api_{selected_field}_verified_by_run_dom_card"
+    if fallback is not None:
+        return fallback, f"api_{other_field}_fallback"
+    return published, "products_row_price"
 
 
 # Price variants are used to keep core market monitoring clean.
@@ -2050,9 +2310,9 @@ def config_signature_without_android_from_product_row(row: pd.Series) -> str:
     ram_num = re.search(r"[0-9]+(?:\.[0-9]+)?", ram)
     storage_num = re.search(r"[0-9]+(?:\.[0-9]+)?", storage)
     return "|".join([
-        cpu_num.group(0).rstrip(".0") if cpu_num and cpu_num.group(0).endswith(".0") else (cpu_num.group(0) if cpu_num else cpu),
-        ram_num.group(0).rstrip(".0") if ram_num and ram_num.group(0).endswith(".0") else (ram_num.group(0) if ram_num else ram),
-        storage_num.group(0).rstrip(".0") if storage_num and storage_num.group(0).endswith(".0") else (storage_num.group(0) if storage_num else storage),
+        cpu_num.group(0)[:-2] if cpu_num and cpu_num.group(0).endswith(".0") else (cpu_num.group(0) if cpu_num else cpu),
+        ram_num.group(0)[:-2] if ram_num and ram_num.group(0).endswith(".0") else (ram_num.group(0) if ram_num else ram),
+        storage_num.group(0)[:-2] if storage_num and storage_num.group(0).endswith(".0") else (storage_num.group(0) if storage_num else storage),
     ])
 
 
@@ -2063,7 +2323,7 @@ def android_version_from_row(row: pd.Series | dict[str, Any]) -> str:
         value = None
     text = normalize_display_text(value)
     match = re.search(r"[0-9]+(?:\.[0-9]+)?", text)
-    return match.group(0).rstrip(".0") if match and match.group(0).endswith(".0") else (match.group(0) if match else text)
+    return match.group(0)[:-2] if match and match.group(0).endswith(".0") else (match.group(0) if match else text)
 
 
 def is_core_price_variant(promotion_text: Any = "", raw_text: Any = "", duration_text: Any = "") -> bool:
@@ -2098,6 +2358,45 @@ def normalize_series_product(value: Any) -> str:
     return normalize_token(normalize_display_text(value))
 
 
+PURCHASE_MODE_SUBSCRIPTION = "subscription"
+PURCHASE_MODE_NON_SUBSCRIPTION = "non_subscription"
+PURCHASE_MODE_STANDARD = "standard"
+PURCHASE_MODE_TOKEN_PREFIX = "purchase_mode="
+PURCHASE_MODE_PLATFORMS = {BASE_PLATFORM, "VSPhone"}
+
+
+def normalize_purchase_mode(platform: Any, value: Any = None) -> str:
+    platform_name = normalize_platform_name(platform)
+    text = normalize_token(value).replace("-", "_")
+    if platform_name not in PURCHASE_MODE_PLATFORMS:
+        return PURCHASE_MODE_STANDARD
+    if text in {"non_subscription", "nonsubscription", "one_time", "onetime", "single_purchase", "unsubscribed", "off", "false", "0", "非订阅", "非訂閱"}:
+        return PURCHASE_MODE_NON_SUBSCRIPTION
+    # Historical UgPhone and VSPhone rows created before purchase_mode existed
+    # were both collected with Subscribe/auto-renew enabled.
+    return PURCHASE_MODE_SUBSCRIPTION
+
+
+def strip_purchase_mode_from_signature(value: Any) -> str:
+    parts = [part for part in normalize_display_text(value).split("|") if not part.startswith(PURCHASE_MODE_TOKEN_PREFIX)]
+    return "|".join(parts)
+
+
+def purchase_mode_from_signature(platform: Any, value: Any) -> str:
+    for part in normalize_display_text(value).split("|"):
+        if part.startswith(PURCHASE_MODE_TOKEN_PREFIX):
+            return normalize_purchase_mode(platform, part.split("=", 1)[1])
+    return normalize_purchase_mode(platform, None)
+
+
+def signature_with_purchase_mode(platform: Any, signature: Any, purchase_mode: Any = None) -> str:
+    clean = strip_purchase_mode_from_signature(signature)
+    mode = normalize_purchase_mode(platform, purchase_mode)
+    if normalize_platform_name(platform) not in PURCHASE_MODE_PLATFORMS:
+        return clean
+    return f"{clean}|{PURCHASE_MODE_TOKEN_PREFIX}{mode}" if clean else f"{PURCHASE_MODE_TOKEN_PREFIX}{mode}"
+
+
 def normalize_config_signature(value: Any) -> str:
     """Create a stable configuration signature for matching historical product rows.
 
@@ -2113,15 +2412,15 @@ def normalize_config_signature(value: Any) -> str:
     storage = ""
     android_match = re.search(r"(?:android|a)\s*([0-9]+(?:\.[0-9]+)?)", lower)
     if android_match:
-        android = android_match.group(1).rstrip(".0") if android_match.group(1).endswith(".0") else android_match.group(1)
+        android = android_match.group(1)[:-2] if android_match.group(1).endswith(".0") else android_match.group(1)
     cpu_match = re.search(r"([0-9]+(?:\.[0-9]+)?)\s*(?:cores?|c\b)", lower)
     if cpu_match:
-        cpu = cpu_match.group(1).rstrip(".0") if cpu_match.group(1).endswith(".0") else cpu_match.group(1)
+        cpu = cpu_match.group(1)[:-2] if cpu_match.group(1).endswith(".0") else cpu_match.group(1)
     gb_values = re.findall(r"([0-9]+(?:\.[0-9]+)?)\s*gb", lower)
     if gb_values:
-        ram = gb_values[0].rstrip(".0") if gb_values[0].endswith(".0") else gb_values[0]
+        ram = gb_values[0][:-2] if gb_values[0].endswith(".0") else gb_values[0]
     if len(gb_values) > 1:
-        storage = gb_values[1].rstrip(".0") if gb_values[1].endswith(".0") else gb_values[1]
+        storage = gb_values[1][:-2] if gb_values[1].endswith(".0") else gb_values[1]
     if not any([android, cpu, ram, storage]):
         return normalize_token(text)
     return "|".join([android, cpu, ram, storage])
@@ -2138,9 +2437,9 @@ def config_signature_from_product_row(row: pd.Series) -> str:
     storage_num = re.search(r"[0-9]+(?:\.[0-9]+)?", storage)
     return "|".join([
         android,
-        cpu_num.group(0).rstrip(".0") if cpu_num and cpu_num.group(0).endswith(".0") else (cpu_num.group(0) if cpu_num else cpu),
-        ram_num.group(0).rstrip(".0") if ram_num and ram_num.group(0).endswith(".0") else (ram_num.group(0) if ram_num else ram),
-        storage_num.group(0).rstrip(".0") if storage_num and storage_num.group(0).endswith(".0") else (storage_num.group(0) if storage_num else storage),
+        cpu_num.group(0)[:-2] if cpu_num and cpu_num.group(0).endswith(".0") else (cpu_num.group(0) if cpu_num else cpu),
+        ram_num.group(0)[:-2] if ram_num and ram_num.group(0).endswith(".0") else (ram_num.group(0) if ram_num else ram),
+        storage_num.group(0)[:-2] if storage_num and storage_num.group(0).endswith(".0") else (storage_num.group(0) if storage_num else storage),
     ])
 
 
@@ -2236,6 +2535,83 @@ def output_run_date_from_products(run_dir: Path) -> str | None:
     return None
 
 
+
+def load_manual_dashboard_price_corrections() -> list[dict[str, Any]]:
+    """Load narrowly scoped, auditable historical price corrections.
+
+    The file changes Dashboard-derived history only. It never rewrites original
+    products.csv/products.xlsx evidence. Invalid entries are ignored.
+    """
+    global _MANUAL_DASHBOARD_PRICE_CORRECTIONS_CACHE
+    if _MANUAL_DASHBOARD_PRICE_CORRECTIONS_CACHE is not None:
+        return _MANUAL_DASHBOARD_PRICE_CORRECTIONS_CACHE
+    try:
+        payload = json.loads(MANUAL_DASHBOARD_PRICE_CORRECTIONS_PATH.read_text(encoding="utf-8"))
+    except Exception:
+        payload = []
+    if isinstance(payload, dict):
+        payload = payload.get("corrections") or []
+    valid: list[dict[str, Any]] = []
+    for item in payload if isinstance(payload, list) else []:
+        if not isinstance(item, dict):
+            continue
+        date = str(item.get("date") or "").strip()
+        platform = normalize_platform_name(item.get("platform"))
+        product_model = normalize_series_product(item.get("product_model"))
+        duration_days = parse_float_value(item.get("duration_days"))
+        purchase_mode = normalize_purchase_mode(platform, item.get("purchase_mode"))
+        price = parse_float_value(item.get("price"))
+        if (
+            not is_iso_date_label(date)
+            or not platform
+            or not product_model
+            or duration_days is None
+            or price is None
+        ):
+            continue
+        valid.append({
+            **item,
+            "date": date,
+            "platform": platform,
+            "product_model_key": product_model,
+            "duration_days": duration_days,
+            "purchase_mode": purchase_mode,
+            "price": price,
+        })
+    _MANUAL_DASHBOARD_PRICE_CORRECTIONS_CACHE = valid
+    return valid
+
+
+def manual_dashboard_price_correction(
+    *,
+    date: Any,
+    platform: Any,
+    product_model: Any,
+    duration_days: Any,
+    purchase_mode: Any,
+) -> dict[str, Any] | None:
+    date_key = str(date or "").strip()
+    platform_key = normalize_platform_name(platform)
+    product_key = normalize_series_product(product_model)
+    duration_key = parse_float_value(duration_days)
+    mode_key = normalize_purchase_mode(platform_key, purchase_mode)
+    if duration_key is None:
+        return None
+    for item in load_manual_dashboard_price_corrections():
+        if item["date"] != date_key:
+            continue
+        if item["platform"] != platform_key:
+            continue
+        if item["product_model_key"] != product_key:
+            continue
+        if abs(float(item["duration_days"]) - duration_key) > 0.000001:
+            continue
+        if item["purchase_mode"] != mode_key:
+            continue
+        return dict(item)
+    return None
+
+
 def output_run_date(run_dir: Path) -> str | None:
     # The dashboard business date must be UTC+8.  Prefer row-level products
     # crawl_time_local / crawl_time_utc converted to UTC+8 for *all* output
@@ -2297,6 +2673,7 @@ def add_history_point(
     actual_duration_days: Any = None,
     actual_duration_display: Any = None,
     comparison_duration_note: Any = None,
+    purchase_mode: Any = None,
 ) -> None:
     price_value = parse_float_value(price)
     if price_value is None or not is_iso_date_label(date):
@@ -2306,6 +2683,8 @@ def add_history_point(
     bucket_key = str(bucket)
     if not platform_name or not product_key or bucket_key in {"", "unknown"}:
         return
+    purchase_mode_value = normalize_purchase_mode(platform_name, purchase_mode)
+    config_signature = signature_with_purchase_mode(platform_name, config_signature, purchase_mode_value)
     point = {
         "date": date,
         "price": json_safe(price_value),
@@ -2329,6 +2708,7 @@ def add_history_point(
         "actual_duration_days": json_safe(actual_duration_days),
         "actual_duration_display": json_safe(actual_duration_display),
         "comparison_duration_note": json_safe(comparison_duration_note),
+        "purchase_mode": purchase_mode_value,
     }
     strict_key = (platform_name, product_key, config_signature, bucket_key)
     loose_key = (platform_name, product_key, bucket_key)
@@ -2379,6 +2759,7 @@ def add_regional_history_point(
     actual_duration_display: Any = None,
     comparison_duration_note: Any = None,
     selected_android_versions: Any = None,
+    purchase_mode: Any = None,
 ) -> None:
     price_value = parse_float_value(price)
     region_label = normalize_region_label(region)
@@ -2389,6 +2770,8 @@ def add_regional_history_point(
     bucket_key = str(bucket)
     if not platform_name or not product_key or bucket_key in {"", "unknown"}:
         return
+    purchase_mode_value = normalize_purchase_mode(platform_name, purchase_mode)
+    config_signature = signature_with_purchase_mode(platform_name, config_signature, purchase_mode_value)
     point = {
         "date": date,
         "price": json_safe(price_value),
@@ -2411,6 +2794,7 @@ def add_regional_history_point(
         "comparison_duration_note": json_safe(comparison_duration_note),
         "selected_android_versions": json_safe(selected_android_versions),
         "region_price_selection_rule": "按所选机房/地区展示该地区当前可购买单设备实付价；新客价、无库存、不可购买价格不参与该机房趋势。",
+        "purchase_mode": purchase_mode_value,
     }
     strict_key = (platform_name, product_key, config_signature, bucket_key)
     loose_key = (platform_name, product_key, bucket_key)
@@ -2469,6 +2853,348 @@ def read_products_history_frame(run_dir: Path) -> pd.DataFrame:
     return pd.DataFrame()
 
 
+
+def _canonical_version_token(value: Any) -> str:
+    number = parse_float_value(value)
+    if number is not None:
+        return f"{number:g}"
+    return normalize_token(value).replace("android", "")
+
+
+def _current_product_key(
+    *,
+    platform: Any,
+    product_model: Any,
+    android_version: Any,
+    cpu: Any,
+    ram: Any,
+    storage: Any,
+    duration_days: Any,
+    purchase_mode: Any = None,
+) -> tuple[str, str, str, str, str, str, str, str]:
+    platform_name = normalize_platform_name(platform)
+    days = parse_float_value(duration_days)
+    days_token = f"{days:g}" if days is not None else ""
+    return (
+        platform_name,
+        normalize_series_product(product_model),
+        _canonical_version_token(android_version),
+        normalize_token(cpu),
+        normalize_token(ram),
+        normalize_token(storage),
+        days_token,
+        normalize_purchase_mode(platform_name, purchase_mode),
+    )
+
+
+def _current_product_key_from_row(row: Any) -> tuple[str, str, str, str, str, str, str, str]:
+    platform = row.get("platform")
+    return _current_product_key(
+        platform=platform,
+        product_model=row.get("product_model"),
+        android_version=row.get("android_version"),
+        cpu=row.get("cpu"),
+        ram=row.get("ram"),
+        storage=row.get("storage"),
+        duration_days=parse_duration_days(row.get("duration")),
+        purchase_mode=row.get("purchase_mode"),
+    )
+
+
+def _row_region_weight(row: Any) -> int:
+    regions = split_region_values(row.get("supported_server_regions") or row.get("server_region"))
+    return max(1, len(regions))
+
+
+def build_current_price_snapshot(output_dir: Path) -> dict[str, Any]:
+    """Build a safe authoritative price snapshot from the current run only.
+
+    The quality workbook may contain baseline fallback rows. Dashboard fields
+    called *current* must instead be anchored to this run's products table.
+    No cookies, tokens, account ids, raw HTML or API bodies are exported.
+    """
+    frame = read_products_history_frame(output_dir)
+    if frame.empty:
+        return {
+            "generated_at_utc": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+            "source_output_dir": str(output_dir),
+            "collection_date": output_run_date(output_dir),
+            "data_revision": None,
+            "rows": [],
+            "lookup": {},
+        }
+    rename_map = {cn: en for cn, en in PRODUCT_COLS.items() if cn in frame.columns}
+    if rename_map:
+        frame = frame.rename(columns=rename_map)
+    for column in [
+        "platform", "product_model", "android_version", "cpu", "ram", "storage",
+        "duration", "purchase_mode", "price", "original_price", "promotion_text",
+        "stock_status", "supported_server_regions", "server_region", "crawl_time_local",
+        "raw_text", "notes", "api_response_path",
+    ]:
+        if column not in frame.columns:
+            frame[column] = None
+
+    vsphone_subscription_api_field, vsphone_price_authority_evidence = infer_vsphone_subscription_api_field(frame)
+    grouped: dict[tuple[str, str, str, str, str, str, str, str], list[dict[str, Any]]] = {}
+    for _, row in frame.iterrows():
+        price, authoritative_price_source = authoritative_product_row_price(
+            row,
+            vsphone_subscription_api_field=vsphone_subscription_api_field,
+        )
+        if price is None:
+            continue
+        stock = normalize_token(row.get("stock_status"))
+        if stock in {"soldout", "sold_out", "unavailable", "outofstock", "out_of_stock"}:
+            continue
+        key = _current_product_key_from_row(row)
+        if not key[0] or not key[1] or not key[6]:
+            continue
+        candidate = row.to_dict()
+        candidate["_authoritative_price"] = price
+        candidate["_authoritative_price_source"] = authoritative_price_source
+        grouped.setdefault(key, []).append(candidate)
+
+    lookup: dict[tuple[str, str, str, str, str, str, str, str], dict[str, Any]] = {}
+    rows: list[dict[str, Any]] = []
+    for key, candidates in grouped.items():
+        by_price: dict[float, dict[str, Any]] = {}
+        for candidate in candidates:
+            price = parse_float_value(candidate.get("_authoritative_price"))
+            if price is None:
+                continue
+            bucket = by_price.setdefault(price, {"weight": 0, "rows": []})
+            bucket["weight"] += _row_region_weight(candidate)
+            bucket["rows"].append(candidate)
+        if not by_price:
+            continue
+        selected_price, selected = sorted(
+            by_price.items(), key=lambda item: (-int(item[1]["weight"]), float(item[0]))
+        )[0]
+        representative = selected["rows"][0]
+        entry = {
+            "platform": key[0],
+            "product_model": normalize_display_text(representative.get("product_model")),
+            "android_version": json_safe(representative.get("android_version")),
+            "cpu": json_safe(representative.get("cpu")),
+            "ram": json_safe(representative.get("ram")),
+            "storage": json_safe(representative.get("storage")),
+            "duration_days": json_safe(parse_float_value(key[6])),
+            "duration": json_safe(representative.get("duration")),
+            "purchase_mode": key[7],
+            "price": json_safe(selected_price),
+            "original_price": json_safe(parse_float_value(representative.get("original_price"))),
+            "promotion_text": json_safe(representative.get("promotion_text")),
+            "supported_server_regions": json_safe(representative.get("supported_server_regions") or representative.get("server_region")),
+            "crawl_time_local": json_safe(representative.get("crawl_time_local")),
+            "authoritative_price_source": representative.get("_authoritative_price_source"),
+            "vsphone_subscription_api_field": vsphone_subscription_api_field if key[0] == "VSPhone" else None,
+            "selection_rule": "current run majority-region payable price; VSPhone API field is selected by matching the verified live DOM card; lower price only breaks an equal region-count tie",
+        }
+        lookup[key] = entry
+        rows.append(entry)
+
+    source_file = output_dir / "products.csv"
+    if not source_file.exists():
+        source_file = output_dir / "products.xlsx"
+    try:
+        digest = hashlib.sha256(source_file.read_bytes()).hexdigest()[:20]
+    except Exception:
+        digest = hashlib.sha256(json.dumps(rows, ensure_ascii=False, sort_keys=True, default=str).encode("utf-8")).hexdigest()[:20]
+    rows.sort(key=lambda row: (
+        str(row.get("platform") or ""), str(row.get("product_model") or ""),
+        str(row.get("android_version") or ""), float(row.get("duration_days") or 0),
+        str(row.get("purchase_mode") or ""),
+    ))
+    return {
+        "generated_at_utc": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+        "source_output_dir": str(output_dir),
+        "source_file": source_file.name,
+        "collection_date": output_run_date(output_dir),
+        "data_revision": digest,
+        "price_authority": "current_run_products_table_with_vsphone_dom_verified_api_field",
+        "vsphone_subscription_api_field": vsphone_subscription_api_field,
+        "vsphone_price_authority_evidence": vsphone_price_authority_evidence,
+        "rows": rows,
+        "lookup": lookup,
+    }
+
+
+def _snapshot_match(
+    lookup: dict[tuple[str, str, str, str, str, str, str, str], dict[str, Any]],
+    *,
+    platform: Any,
+    product_model: Any,
+    android_version: Any,
+    cpu: Any,
+    ram: Any,
+    storage: Any,
+    duration_days: Any,
+    purchase_mode: Any = None,
+) -> dict[str, Any] | None:
+    key = _current_product_key(
+        platform=platform,
+        product_model=product_model,
+        android_version=android_version,
+        cpu=cpu,
+        ram=ram,
+        storage=storage,
+        duration_days=duration_days,
+        purchase_mode=purchase_mode,
+    )
+    exact = lookup.get(key)
+    if exact:
+        return exact
+    # Some old quality rows omit Android or preserve it as 10.0. Match the same
+    # platform/product/config/duration when exactly one current candidate exists.
+    candidates = [
+        value for candidate_key, value in lookup.items()
+        if candidate_key[0] == key[0]
+        and candidate_key[1] == key[1]
+        and candidate_key[3:8] == key[3:8]
+    ]
+    return candidates[0] if len(candidates) == 1 else None
+
+
+def _effective_30d(price: Any, duration_days: Any, device_count: Any = 1) -> float | None:
+    value = parse_float_value(price)
+    days = parse_float_value(duration_days)
+    devices = parse_float_value(device_count) or 1.0
+    if value is None or days in {None, 0} or devices <= 0:
+        return None
+    return value / devices * 30.0 / days
+
+
+def overlay_quality_details_from_current_snapshot(
+    details: pd.DataFrame,
+    snapshot: dict[str, Any],
+) -> tuple[pd.DataFrame, dict[str, int]]:
+    if details.empty or not snapshot.get("lookup"):
+        return details, {"ug_rows": 0, "competitor_rows": 0}
+    out = details.copy()
+    lookup = snapshot["lookup"]
+    ug_count = 0
+    competitor_count = 0
+    for index, row in out.iterrows():
+        ug_parts = parse_ug_config(row.get("ug_config"))
+        ug_match = _snapshot_match(
+            lookup,
+            platform=BASE_PLATFORM,
+            product_model=row.get("ug_product_model"),
+            android_version=ug_parts.get("ug_android_version"),
+            cpu=ug_parts.get("ug_cpu"),
+            ram=ug_parts.get("ug_ram"),
+            storage=ug_parts.get("ug_storage"),
+            duration_days=row.get("duration_days"),
+            purchase_mode=PURCHASE_MODE_SUBSCRIPTION,
+        )
+        if ug_match:
+            current = _effective_30d(ug_match.get("price"), row.get("duration_days"), row.get("ug_device_count"))
+            original = _effective_30d(ug_match.get("original_price"), row.get("duration_days"), row.get("ug_device_count"))
+            if current is not None:
+                out.at[index, "ug_effective_price_30d"] = current
+                if original is not None:
+                    out.at[index, "ug_list_price_30d"] = original
+                    out.at[index, "ug_discount_rate"] = 1 - current / original if original else None
+                ug_count += 1
+
+        competitor_parts = parse_ug_config(row.get("competitor_config"))
+        competitor_match = _snapshot_match(
+            lookup,
+            platform=row.get("competitor_platform"),
+            product_model=row.get("competitor_product_model"),
+            android_version=competitor_parts.get("ug_android_version"),
+            cpu=competitor_parts.get("ug_cpu"),
+            ram=competitor_parts.get("ug_ram"),
+            storage=competitor_parts.get("ug_storage"),
+            duration_days=row.get("competitor_duration_days"),
+            purchase_mode=PURCHASE_MODE_SUBSCRIPTION,
+        )
+        if competitor_match:
+            current = _effective_30d(
+                competitor_match.get("price"), row.get("competitor_duration_days"), row.get("competitor_device_count")
+            )
+            original = _effective_30d(
+                competitor_match.get("original_price"), row.get("competitor_duration_days"), row.get("competitor_device_count")
+            )
+            if current is not None:
+                out.at[index, "competitor_effective_price_30d"] = current
+                if original is not None:
+                    out.at[index, "competitor_list_price_30d"] = original
+                    out.at[index, "competitor_discount_rate"] = 1 - current / original if original else None
+                notes = normalize_display_text(row.get("notes"))
+                marker = "dashboard_current_products_overlay_applied"
+                out.at[index, "notes"] = f"{notes}; {marker}".strip("; ") if marker not in notes else notes
+                competitor_count += 1
+    return out, {"ug_rows": ug_count, "competitor_rows": competitor_count}
+
+
+def overlay_rationality_from_current_snapshot(
+    rationality: pd.DataFrame,
+    snapshot: dict[str, Any],
+) -> tuple[pd.DataFrame, int]:
+    if rationality.empty or not snapshot.get("lookup"):
+        return rationality, 0
+    out = rationality.copy()
+    lookup = snapshot["lookup"]
+    count = 0
+    for index, row in out.iterrows():
+        match = _snapshot_match(
+            lookup,
+            platform=row.get("platform"),
+            product_model=row.get("product_model"),
+            android_version=row.get("android_version"),
+            cpu=row.get("cpu"),
+            ram=row.get("ram"),
+            storage=row.get("storage"),
+            duration_days=row.get("duration_days"),
+            purchase_mode=PURCHASE_MODE_SUBSCRIPTION,
+        )
+        if not match:
+            continue
+        current = _effective_30d(match.get("price"), row.get("duration_days"), 1)
+        original = _effective_30d(match.get("original_price"), row.get("duration_days"), 1)
+        if current is None:
+            continue
+        out.at[index, "current_effective_price_30d"] = current
+        if original is not None:
+            out.at[index, "current_list_price_30d"] = original
+            out.at[index, "current_discount_rate"] = 1 - current / original if original else None
+        baseline = parse_float_value(row.get("baseline_effective_price_30d"))
+        baseline_list = parse_float_value(row.get("baseline_list_price_30d"))
+        baseline_discount = parse_float_value(row.get("baseline_discount_rate"))
+        out.at[index, "own_price_index"] = current / baseline if baseline not in {None, 0} else None
+        out.at[index, "list_price_index"] = original / baseline_list if original is not None and baseline_list not in {None, 0} else None
+        current_discount = parse_float_value(out.at[index, "current_discount_rate"])
+        out.at[index, "discount_rate_change"] = (
+            current_discount - baseline_discount if current_discount is not None and baseline_discount is not None else None
+        )
+        notes = normalize_display_text(row.get("notes"))
+        marker = "dashboard_current_products_overlay_applied"
+        out.at[index, "notes"] = f"{notes}; {marker}".strip("; ") if marker not in notes else notes
+        count += 1
+    return out, count
+
+
+def _new_history_collection_coverage() -> dict[str, dict[Any, set[str]]]:
+    return {
+        "platform_dates": {},
+        "product_dates": {},
+        "bucket_dates": {},
+    }
+
+
+def _coverage_add(
+    coverage: dict[str, dict[Any, set[str]]] | None,
+    section: str,
+    key: Any,
+    date: str,
+) -> None:
+    if coverage is None or not is_iso_date_label(date):
+        return
+    coverage.setdefault(section, {}).setdefault(key, set()).add(str(date))
+
+
 def collect_history_from_products(
     run_dir: Path,
     date: str,
@@ -2481,6 +3207,7 @@ def collect_history_from_products(
     android_loose_history: dict[tuple[str, str, str], dict[str, dict[str, Any]]] | None = None,
     android_regional_history: dict[tuple[str, str, str, str], dict[str, dict[str, dict[str, Any]]]] | None = None,
     android_regional_loose_history: dict[tuple[str, str, str], dict[str, dict[str, dict[str, Any]]]] | None = None,
+    collection_coverage: dict[str, dict[Any, set[str]]] | None = None,
 ) -> int:
     """Read one day's products table and add one clean price point per product line.
 
@@ -2500,21 +3227,61 @@ def collect_history_from_products(
         return 0
 
     source_file = "products.csv" if (run_dir / "products.csv").exists() else "products.xlsx"
-    candidate_groups: dict[tuple[str, str, str, str], list[dict[str, Any]]] = {}
-    android_candidate_groups: dict[tuple[str, str, str, str], list[dict[str, Any]]] = {}
+    vsphone_subscription_api_field, vsphone_price_authority_evidence = infer_vsphone_subscription_api_field(frame)
+    candidate_groups: dict[tuple[str, str, str, str, str], list[dict[str, Any]]] = {}
+    android_candidate_groups: dict[tuple[str, str, str, str, str], list[dict[str, Any]]] = {}
 
     for _, row in frame.iterrows():
         platform = normalize_platform_name(row.get("platform"))
         product_model = row.get("product_model")
         product_key = normalize_series_product(product_model)
+        purchase_mode = normalize_purchase_mode(platform, row.get("purchase_mode"))
+        if platform:
+            _coverage_add(collection_coverage, "platform_dates", platform, date)
+        if platform and product_key:
+            _coverage_add(
+                collection_coverage,
+                "product_dates",
+                (platform, product_key, purchase_mode),
+                date,
+            )
         duration_info = normalize_comparison_duration_info(platform, row.get("duration"))
         bucket = duration_info.get("duration_bucket")
         if bucket in {None, "", "unknown"}:
             continue
+        if platform and product_key:
+            _coverage_add(
+                collection_coverage,
+                "bucket_dates",
+                (platform, product_key, str(bucket), purchase_mode),
+                date,
+            )
         promotion_text = row.get("promotion_text")
         raw_text = row.get("raw_text")
         variant = classify_price_variant(promotion_text, raw_text, row.get("duration"))
-        total_price = parse_float_value(row.get("price"))
+        total_price, authoritative_price_source = authoritative_product_row_price(
+            row,
+            vsphone_subscription_api_field=vsphone_subscription_api_field,
+        )
+        manual_correction = manual_dashboard_price_correction(
+            date=date,
+            platform=platform,
+            product_model=product_model,
+            duration_days=duration_info.get("actual_duration_days") or bucket,
+            purchase_mode=purchase_mode,
+        )
+        if manual_correction:
+            total_price = manual_correction["price"]
+            authoritative_price_source = "manual_dashboard_price_correction"
+            if manual_correction.get("price_variant"):
+                variant_name = str(manual_correction.get("price_variant"))
+                variant = {
+                    **variant,
+                    "price_variant": variant_name,
+                    "price_variant_label": PRICE_VARIANT_LABELS.get(variant_name, variant.get("price_variant_label")),
+                    "include_in_core_price_monitor": variant_name in CORE_PRICE_VARIANTS,
+                    "variant_exclusion_reason": "" if variant_name in CORE_PRICE_VARIANTS else variant.get("variant_exclusion_reason"),
+                }
         unit_price = normalize_price_for_variant(total_price, variant)
         if unit_price is None:
             continue
@@ -2550,18 +3317,27 @@ def collect_history_from_products(
             "variant_exclusion_reason": variant["variant_exclusion_reason"],
             "source_run_dir": str(run_dir.as_posix()),
             "source_file": source_file,
+            "authoritative_price_source": authoritative_price_source,
+            "manual_price_correction_reason": (
+                manual_correction.get("reason") if manual_correction else None
+            ),
+            "manual_price_correction_id": (
+                manual_correction.get("id") if manual_correction else None
+            ),
+            "vsphone_subscription_api_field": vsphone_subscription_api_field if platform == "VSPhone" else None,
             "supported_server_regions": json_safe(row.get("supported_server_regions")),
             "server_region": json_safe(row.get("server_region")),
             "selected_regions": region_text,
             "selected_android_versions": android_version,
             "stock_status": json_safe(row.get("stock_status")),
             "is_unavailable_region_price": unavailable,
+            "purchase_mode": purchase_mode,
         }
 
         if is_single_device_payable_variant(variant):
-            key = (platform, product_key, str(bucket), signature_no_android)
+            key = (platform, product_key, str(bucket), signature_no_android, purchase_mode)
             candidate_groups.setdefault(key, []).append(common)
-            android_key = (platform, product_key, str(bucket), signature_full)
+            android_key = (platform, product_key, str(bucket), signature_full, purchase_mode)
             android_candidate_groups.setdefault(android_key, []).append(common)
         elif is_majority_region_activity_override_candidate(common):
             # Narrow override: let UgPhone GVIP 30-day activity rows compete in
@@ -2575,15 +3351,15 @@ def collect_history_from_products(
             override["include_in_core_price_monitor"] = True
             override["variant_exclusion_reason"] = ""
             override["price_variant_override_reason"] = "ugphone_gvip_30_majority_region_activity_price"
-            key = (platform, product_key, str(bucket), signature_no_android)
+            key = (platform, product_key, str(bucket), signature_no_android, purchase_mode)
             candidate_groups.setdefault(key, []).append(override)
-            android_key = (platform, product_key, str(bucket), signature_full)
+            android_key = (platform, product_key, str(bucket), signature_full, purchase_mode)
             android_candidate_groups.setdefault(android_key, []).append(override)
         else:
             other_paid_prices.append(common)
 
     added = 0
-    for (platform, product_key, bucket_key, signature_no_android), candidates in candidate_groups.items():
+    for (platform, product_key, bucket_key, signature_no_android, purchase_mode), candidates in candidate_groups.items():
         purchasable = [row for row in candidates if not row.get("is_unavailable_region_price")]
         if not purchasable:
             for row in candidates:
@@ -2631,6 +3407,7 @@ def collect_history_from_products(
                     actual_duration_days=candidate.get("actual_duration_days"),
                     actual_duration_display=candidate.get("actual_duration_display"),
                     comparison_duration_note=candidate.get("comparison_duration_note"),
+                    purchase_mode=candidate.get("purchase_mode"),
                 )
 
         def group_region_count(group_rows: list[dict[str, Any]]) -> int:
@@ -2675,6 +3452,7 @@ def collect_history_from_products(
             actual_duration_days=representative.get("actual_duration_days"),
             actual_duration_display=representative.get("actual_duration_display"),
             comparison_duration_note=representative.get("comparison_duration_note"),
+            purchase_mode=representative.get("purchase_mode"),
         )
         added += 1
 
@@ -2697,7 +3475,7 @@ def collect_history_from_products(
 
 
     if all(map(lambda value: value is not None, [android_history, android_loose_history, android_regional_history, android_regional_loose_history])):
-        for (platform, product_key, bucket_key, signature_full), candidates in android_candidate_groups.items():
+        for (platform, product_key, bucket_key, signature_full, purchase_mode), candidates in android_candidate_groups.items():
             purchasable = [row for row in candidates if not row.get("is_unavailable_region_price")]
             if not purchasable:
                 continue
@@ -2736,6 +3514,7 @@ def collect_history_from_products(
                         actual_duration_display=candidate.get("actual_duration_display"),
                         comparison_duration_note=candidate.get("comparison_duration_note"),
                         selected_android_versions=candidate.get("selected_android_versions"),
+                        purchase_mode=candidate.get("purchase_mode"),
                     )
 
             def group_region_count(group_rows: list[dict[str, Any]]) -> int:
@@ -2780,6 +3559,7 @@ def collect_history_from_products(
                 actual_duration_days=representative.get("actual_duration_days"),
                 actual_duration_display=representative.get("actual_duration_display"),
                 comparison_duration_note=representative.get("comparison_duration_note"),
+                purchase_mode=representative.get("purchase_mode"),
             )
 
     return added
@@ -2888,6 +3668,7 @@ def collect_history_from_price_trends(
                 actual_duration_days=actual_duration_days,
                 actual_duration_display=actual_duration_display,
                 comparison_duration_note=item.get("comparison_duration_note"),
+                purchase_mode=item.get("purchase_mode") or point.get("purchase_mode"),
             )
 
 
@@ -2947,6 +3728,7 @@ def collect_historical_trend_points(current_output_dir: Path) -> tuple[
     dict[tuple[str, str, str], dict[str, dict[str, Any]]],
     dict[tuple[str, str, str, str], dict[str, dict[str, dict[str, Any]]]],
     dict[tuple[str, str, str], dict[str, dict[str, dict[str, Any]]]],
+    dict[str, dict[Any, set[str]]],
 ]:
     """Collect daily historical prices from prior output/cloud_phone_monitor_* runs.
 
@@ -2971,6 +3753,7 @@ def collect_historical_trend_points(current_output_dir: Path) -> tuple[
     android_loose_history: dict[tuple[str, str, str], dict[str, dict[str, Any]]] = {}
     android_regional_history: dict[tuple[str, str, str, str], dict[str, dict[str, dict[str, Any]]]] = {}
     android_regional_loose_history: dict[tuple[str, str, str], dict[str, dict[str, dict[str, Any]]]] = {}
+    collection_coverage = _new_history_collection_coverage()
 
     # Keep only the latest usable run for each day.
     runs_by_date: dict[str, Path] = {}
@@ -2999,6 +3782,7 @@ def collect_historical_trend_points(current_output_dir: Path) -> tuple[
             android_loose_history,
             android_regional_history,
             android_regional_loose_history,
+            collection_coverage,
         )
         if added == 0:
             collect_history_from_price_trends(run_dir, history, loose_history)
@@ -3014,6 +3798,7 @@ def collect_historical_trend_points(current_output_dir: Path) -> tuple[
         android_loose_history,
         android_regional_history,
         android_regional_loose_history,
+        collection_coverage,
     )
 
 def merge_series_points(
@@ -3126,13 +3911,71 @@ def iso_date_range(start_date: str, end_date: str) -> list[str]:
     return days
 
 
-def fill_points_by_natural_days(points: list[dict[str, Any]], date_range: list[str]) -> list[dict[str, Any]]:
-    """Render on a natural-day x-axis while keeping collection-day data.
+def collection_gap_point_for_series(
+    item: dict[str, Any],
+    date: str,
+    collection_coverage: dict[str, dict[Any, set[str]]] | None,
+) -> dict[str, Any] | None:
+    """Legacy compatibility hook for V25 collection-gap metadata.
 
-    Exact collection dates keep their original point. Missing natural days carry
-    forward the previous valid collected price. This means hovering over a
-    non-collection date such as 2026-05-01 will show the latest real price from
-    2026-04-30, with price_source=carry_forward and carried_from_date recorded.
+    V26 intentionally does *not* infer delisting from a single missing
+    collection-day observation.  A product/region/version can be missed by the
+    scraper even when it is still on sale, so missing observations must keep
+    the previous valid chart value.  Long-term retired UgPhone 15-day products
+    are suppressed in Figure 2 at the presentation layer instead of applying a
+    generic gap rule to every missing SKU.
+    """
+    return None
+
+
+def apply_collection_gap_markers(
+    item: dict[str, Any],
+    points: list[dict[str, Any]],
+    date_range: list[str],
+    collection_coverage: dict[str, dict[Any, set[str]]] | None,
+) -> list[dict[str, Any]]:
+    """Keep the V25 public helper but do not manufacture collection gaps.
+
+    Missing collection-day rows are not reliable evidence of discontinuation.
+    The chart continuity rule is therefore handled only by
+    ``fill_points_by_natural_days``.
+    """
+    return [dict(point) for point in (points or [])]
+
+
+def _carry_forward_point(last_valid: dict[str, Any], date: str, *, missing_source: Any = None) -> dict[str, Any]:
+    origin_date = (
+        last_valid.get("source_collection_date")
+        or last_valid.get("carried_from_date")
+        or last_valid.get("date")
+    )
+    carried = dict(last_valid)
+    carried.update({
+        "date": date,
+        "price": json_safe(last_valid.get("price")),
+        "price_source": "carry_forward",
+        "source_collection_date": origin_date,
+        "carried_from_date": origin_date,
+        "source_price_source": last_valid.get("price_source"),
+        "carry_forward_note": "本次未获得新的有效价格，沿用上一采集日有效价格。",
+    })
+    if missing_source:
+        carried["missing_observation_source"] = json_safe(missing_source)
+    return carried
+
+
+def fill_points_by_natural_days(points: list[dict[str, Any]], date_range: list[str]) -> list[dict[str, Any]]:
+    """Render a continuous natural-day line from the last valid observation.
+
+    V26 restores the pre-V25 semantics requested for ordinary products: if a
+    product, Android version or machine room is not captured on a later run,
+    keep showing the most recent valid price until another real observation
+    replaces it.  A null placeholder such as ``missing_current_products`` is
+    therefore treated the same as an uncollected natural day.
+
+    Only an explicitly marked ``carry_forward_blocked`` point can terminate the
+    chain.  Figure 2's long-retired UgPhone 15-day products are hidden separately
+    and do not require generic collection-gap inference here.
     """
     if not date_range:
         return points
@@ -3143,6 +3986,7 @@ def fill_points_by_natural_days(points: list[dict[str, Any]], date_range: list[s
             existing = by_date.get(date)
             if existing is None or point.get("price") is not None:
                 by_date[date] = {**point, "date": date}
+
     filled: list[dict[str, Any]] = []
     last_valid: dict[str, Any] | None = None
     for date in date_range:
@@ -3153,21 +3997,28 @@ def fill_points_by_natural_days(points: list[dict[str, Any]], date_range: list[s
                 point.setdefault("source_collection_date", date)
                 point.setdefault("carried_from_date", date)
                 last_valid = point
-            filled.append(point)
+                filled.append(point)
+                continue
+
+            if point.get("carry_forward_blocked"):
+                last_valid = None
+                filled.append(point)
+                continue
+
+            if last_valid is not None and last_valid.get("price") is not None:
+                filled.append(
+                    _carry_forward_point(
+                        last_valid,
+                        date,
+                        missing_source=point.get("price_source") or point.get("missing_reason"),
+                    )
+                )
+            else:
+                filled.append(point)
             continue
+
         if last_valid is not None and last_valid.get("price") is not None:
-            origin_date = last_valid.get("source_collection_date") or last_valid.get("carried_from_date") or last_valid.get("date")
-            carried = dict(last_valid)
-            carried.update({
-                "date": date,
-                "price": json_safe(last_valid.get("price")),
-                "price_source": "carry_forward",
-                "source_collection_date": origin_date,
-                "carried_from_date": origin_date,
-                "source_price_source": last_valid.get("price_source"),
-                "carry_forward_note": "当天没有采集数据，沿用上一采集日有效价格。",
-            })
-            filled.append(carried)
+            filled.append(_carry_forward_point(last_valid, date))
         else:
             filled.append({
                 "date": date,
@@ -3178,8 +4029,11 @@ def fill_points_by_natural_days(points: list[dict[str, Any]], date_range: list[s
     return filled
 
 
-def apply_natural_day_axis(series: list[dict[str, Any]]) -> tuple[list[dict[str, Any]], dict[str, Any]]:
-    """Fill each series to every natural day between the first and latest collection date."""
+def apply_natural_day_axis(
+    series: list[dict[str, Any]],
+    collection_coverage: dict[str, dict[Any, set[str]]] | None = None,
+) -> tuple[list[dict[str, Any]], dict[str, Any]]:
+    """Fill every natural day using the latest valid observed price."""
     raw_dates = sorted({
         str(point.get("date"))
         for item in series
@@ -3224,12 +4078,12 @@ def apply_natural_day_axis(series: list[dict[str, Any]]) -> tuple[list[dict[str,
                     if normalize_region_label(region)
                 }
                 child["available_regions"] = sorted(child["regional_points"].keys())
-            child["date_fill_mode"] = "natural_day_axis_with_collection_day_carry_forward"
+            child["date_fill_mode"] = "natural_day_axis_with_last_observation_carry_forward"
             update_series_stats_from_points(child)
             android_children.append(child)
         if android_children:
             item["android_breakdown_series"] = android_children
-        item["date_fill_mode"] = "natural_day_axis_with_collection_day_carry_forward"
+        item["date_fill_mode"] = "natural_day_axis_with_last_observation_carry_forward"
         update_series_stats_from_points(item)
     return series, {
         "history_start_date": raw_dates[0],
@@ -3237,15 +4091,32 @@ def apply_natural_day_axis(series: list[dict[str, Any]]) -> tuple[list[dict[str,
         "raw_collection_dates": raw_dates,
         "filled_dates": filled_dates,
         "natural_history_dates": date_range,
-        "date_fill_mode": "natural_day_axis_with_collection_day_carry_forward",
+        "date_fill_mode": "natural_day_axis_with_last_observation_carry_forward",
     }
 
 
 def update_series_stats_from_points(item: dict[str, Any]) -> None:
-    points = [point for point in (item.get("points") or []) if is_iso_date_label(point.get("date")) and point.get("price") is not None]
+    points = [
+        point for point in (item.get("points") or [])
+        if is_iso_date_label(point.get("date")) and point.get("price") is not None
+    ]
     points = sorted(points, key=lambda point: point.get("date"))
     if not points:
         return
+
+    # V26: the rendered current value is the latest valid point, including a
+    # carry-forward point generated when the latest run did not observe this
+    # product/region/version.  Provenance remains visible through price_source
+    # and source_collection_date; we do not relabel it as a new current capture.
+    current_point = points[-1]
+    current = current_point.get("price")
+    previous = points[-2].get("price") if len(points) >= 2 else item.get("previous_price")
+    item["current_price"] = json_safe(current)
+    item["previous_price"] = json_safe(previous)
+    item["price_source"] = current_point.get("price_source") or item.get("price_source")
+    item.pop("current_missing_reason", None)
+    if current is not None and previous not in {None, 0}:
+        item["price_change_pct"] = json_safe((float(current) - float(previous)) / float(previous))
 
     # Natural-day points include carry_forward values.  They are useful for
     # display, but they must not hide whether the product actually changed on
@@ -3253,13 +4124,6 @@ def update_series_stats_from_points(item: dict[str, Any]) -> None:
     #   1) current/previous: for the rendered natural-day chart
     #   2) collection_*: for audit and for explaining whether historical output
     #      really contains price changes.
-    current = points[-1].get("price")
-    previous = points[-2].get("price") if len(points) >= 2 else item.get("previous_price")
-    item["current_price"] = json_safe(current)
-    item["previous_price"] = json_safe(previous)
-    if current is not None and previous not in {None, 0}:
-        item["price_change_pct"] = json_safe((float(current) - float(previous)) / float(previous))
-
     collection_points = [point for point in points if point.get("price_source") != "carry_forward"]
     # If a series only has carried values for some reason, fall back to all points.
     if not collection_points:
@@ -3400,11 +4264,20 @@ def merge_equivalent_android_price_series(series: list[dict[str, Any]]) -> list[
     groups: dict[tuple[Any, ...], list[dict[str, Any]]] = {}
     for item in series:
         platform = normalize_platform_name(item.get("platform"))
+        # Pairing identity is part of the product-line identity.  A competitor
+        # SKU may legitimately appear in several UgPhone pairing groups with the
+        # same configuration and identical price history.  Merging across those
+        # groups loses the selected UgPhone product relation (for example a
+        # Redfinger VIP line paired to both UVIP and GVIP).  Keep Android-version
+        # deduplication inside one UgPhone product group only.
+        pairing_product = normalize_series_product(item.get("ug_product_model"))
         key = (
             platform,
             normalize_series_product(item.get("product_model")),
+            pairing_product,
             str(item.get("duration_bucket") or ""),
             normalize_token(config_without_android_version(item.get("config"))),
+            normalize_purchase_mode(platform, item.get("purchase_mode")),
             price_sequence_signature(item),
         )
         groups.setdefault(key, []).append(item)
@@ -3416,6 +4289,8 @@ def merge_equivalent_android_price_series(series: list[dict[str, Any]]) -> list[
             item.setdefault("merged_series_count", 1)
             item.setdefault("merged_android_versions", extract_android_versions_from_config(item.get("config")))
             item.setdefault("ug_config_ids", [item.get("ug_config_id")] if item.get("ug_config_id") else [])
+            pairing_products = [normalize_display_text(item.get("ug_product_model"))] if normalize_display_text(item.get("ug_product_model")) else []
+            item.setdefault("ug_product_models", pairing_products)
             if isinstance(item.get("regional_points"), dict):
                 item["available_regions"] = sorted(normalize_region_label(region) for region in item.get("regional_points", {}).keys() if normalize_region_label(region))
             item["android_breakdown_series"] = stable_list(item.get("android_breakdown_series"))
@@ -3433,6 +4308,7 @@ def merge_equivalent_android_price_series(series: list[dict[str, Any]]) -> list[
         configs = [item.get("config") for item in group_items]
         android_versions: list[str] = []
         ug_config_ids: list[Any] = []
+        ug_product_models: list[str] = []
         source_series_ids: list[Any] = []
         scores: list[float] = []
         comparability_levels: list[str] = []
@@ -3447,6 +4323,13 @@ def merge_equivalent_android_price_series(series: list[dict[str, Any]]) -> list[
             ug_id = item.get("ug_config_id")
             if ug_id not in {None, ""} and ug_id not in ug_config_ids:
                 ug_config_ids.append(ug_id)
+            ug_product = normalize_display_text(item.get("ug_product_model"))
+            if ug_product and ug_product not in ug_product_models:
+                ug_product_models.append(ug_product)
+            for candidate in stable_list(item.get("ug_product_models")):
+                normalized_candidate = normalize_display_text(candidate)
+                if normalized_candidate and normalized_candidate not in ug_product_models:
+                    ug_product_models.append(normalized_candidate)
             score = parse_float_value(item.get("config_similarity_score"))
             if score is not None:
                 scores.append(score)
@@ -3482,6 +4365,9 @@ def merge_equivalent_android_price_series(series: list[dict[str, Any]]) -> list[
             base["android_breakdown_series"] = sorted(unique_children.values(), key=lambda child: (android_version_sort_key(child.get("android_version")), str(child.get("series_id") or "")))
         base["source_series_ids"] = [json_safe(value) for value in source_series_ids if value]
         base["ug_config_ids"] = [json_safe(value) for value in ug_config_ids]
+        base["ug_product_models"] = [json_safe(value) for value in ug_product_models]
+        if len(ug_product_models) == 1:
+            base["ug_product_model"] = json_safe(ug_product_models[0])
         if ug_config_ids:
             base["ug_config_id"] = json_safe(ug_config_ids[0] if len(ug_config_ids) == 1 else compact_series_id("merged_ug_config", *ug_config_ids))
         if len(android_versions) > 1:
@@ -3537,6 +4423,7 @@ def build_price_trends(
         android_loose_history,
         android_regional_history,
         android_regional_loose_history,
+        collection_coverage,
     ) = collect_historical_trend_points(output_dir)
     change_lookup: dict[tuple[str, str, str], dict[str, Any]] = {}
     for row in price_changes:
@@ -3562,8 +4449,11 @@ def build_price_trends(
         comparability_level: str,
         config_similarity_score: Any,
         ug_product_model_value: Any = None,
+        purchase_mode: Any = None,
     ) -> list[dict[str, Any]]:
         platform_name = normalize_platform_name(platform)
+        purchase_mode_value = normalize_purchase_mode(platform_name, purchase_mode)
+        signature_no_android = signature_with_purchase_mode(platform_name, signature_no_android, purchase_mode_value)
         matched_keys = sorted(
             key for key in android_history.keys()
             if key[0] == platform_name
@@ -3575,8 +4465,14 @@ def build_price_trends(
         for key in matched_keys:
             _, _, signature_full, _ = key
             android_version = android_version_from_config_signature_value(signature_full)
-            if not android_version:
-                continue
+            if normalize_token(android_version) in {"", "nan", "none", "null", "unknown", "default"}:
+                # UVIP and SVIP expose no separate version selector, but their
+                # purchase-page specification explicitly reports Android 10.
+                # Older rows stored that selector-less state as NaN/default.
+                if platform_name == BASE_PLATFORM and normalize_series_product(product_model) in {"uvip", "svip"}:
+                    android_version = "10"
+                else:
+                    continue
             hist_points = android_history.get(key) or {}
             if not hist_points:
                 hist_points = android_loose_history.get((platform_name, product_key, bucket_key), {})
@@ -3593,7 +4489,7 @@ def build_price_trends(
                 "platform": platform_name,
                 "product_model": json_safe(product_model),
                 "ug_product_model": json_safe(ug_product_model_value if ug_product_model_value is not None else (product_model if platform_name == BASE_PLATFORM else None)),
-                "config": json_safe(f"Android {android_version} / {signature_no_android}"),
+                "config": json_safe(f"Android {android_version} / {strip_purchase_mode_from_signature(signature_no_android)}"),
                 "config_signature": signature_full,
                 "ug_config_id": json_safe(ug_config_id_value),
                 "duration_bucket": json_safe(bucket_key),
@@ -3624,6 +4520,7 @@ def build_price_trends(
                 "display_android_versions": [android_version],
                 "android_display_mode": "expanded",
                 "parent_non_android_config_signature": signature_no_android,
+                "purchase_mode": purchase_mode_value,
             }
             update_series_stats_from_points(child)
             children.append(child)
@@ -3642,22 +4539,32 @@ def build_price_trends(
         config_similarity_score: Any,
         price_source: str = "current",
         ug_product_model_value: Any = None,
+        purchase_mode: Any = None,
     ) -> None:
         platform = normalize_platform_name(platform)
         product_key = normalize_series_product(product_model)
         bucket_key = str(bucket)
         signature = normalize_config_signature(config)
-        signature_no_android = config_signature_without_android_from_signature(signature)
+        purchase_mode_value = normalize_purchase_mode(platform, purchase_mode)
+        signature_no_android = signature_with_purchase_mode(
+            platform,
+            config_signature_without_android_from_signature(signature),
+            purchase_mode_value,
+        )
         change = change_lookup.get((platform, product_key, bucket_key), {})
         previous = change.get("previous_price")
         baseline = change.get("baseline_price")
-        current = current_price if current_price is not None else change.get("current_price")
+        # The caller's current_price comes from the current products snapshot
+        # (via duration comparison).  Do not resurrect a missing current SKU from
+        # price_change_tracking, because that table may still contain baseline
+        # fallback values for comparison diagnostics.
+        current = current_price
         source = price_source
-        if current is None and baseline is not None:
-            current = baseline
-            source = "baseline_fallback"
-        elif current is None:
-            source = "missing"
+        # Baseline is comparison context only.  Never manufacture a current-day
+        # chart point from baseline when the current products table did not
+        # observe the SKU.  Historical products.csv points remain authoritative.
+        if current is None:
+            source = "missing_current_products"
         if previous is None:
             previous = baseline if baseline is not None else current
         line_name = f"{platform} {product_model or '-'} {duration_display or bucket}"
@@ -3684,6 +4591,7 @@ def build_price_trends(
             comparability_level=comparability_level,
             config_similarity_score=config_similarity_score,
             ug_product_model_value=ug_product_model_value,
+            purchase_mode=purchase_mode_value,
         )
         item = {
             "series_id": compact_series_id(platform, product_model, ug_config_id_value, signature, bucket),
@@ -3714,6 +4622,7 @@ def build_price_trends(
             "regional_points": regional_points,
             "available_regions": sorted(regional_points.keys()),
             "android_breakdown_series": android_breakdown_series,
+            "purchase_mode": purchase_mode_value,
         }
         update_series_stats_from_points(item)
         series.append(item)
@@ -3774,7 +4683,16 @@ def build_price_trends(
         points = merge_series_points([], hist_points)
         regional_hist_points = regional_loose_history.get((platform, product_key, bucket_key), {})
         regional_points = merge_regional_points_map(regional_hist_points or {})
-        signature_no_android = config_signature_without_android_from_signature(sample.get("config_signature") or "")
+        purchase_mode_value = normalize_purchase_mode(platform, sample.get("purchase_mode"))
+        # Mode-aware one-time rows are emitted by the dedicated block below so
+        # they can retain the same UgPhone pairing groups as subscription rows.
+        if platform in PURCHASE_MODE_PLATFORMS and purchase_mode_value == PURCHASE_MODE_NON_SUBSCRIPTION:
+            continue
+        signature_no_android = signature_with_purchase_mode(
+            platform,
+            config_signature_without_android_from_signature(sample.get("config_signature") or ""),
+            purchase_mode_value,
+        )
         android_breakdown_series = build_android_breakdown_series_for_item(
             platform=platform,
             product_model=product_model,
@@ -3786,6 +4704,7 @@ def build_price_trends(
             comparability_level="historical_unmatched",
             config_similarity_score=None,
             ug_product_model_value=product_model if platform == BASE_PLATFORM else None,
+            purchase_mode=purchase_mode_value,
         )
         item = {
             "series_id": compact_series_id(platform, product_model, "history_only", bucket_key),
@@ -3815,9 +4734,157 @@ def build_price_trends(
             "regional_points": regional_points,
             "available_regions": sorted(regional_points.keys()),
             "android_breakdown_series": android_breakdown_series,
+            "purchase_mode": purchase_mode_value,
         }
         update_series_stats_from_points(item)
         series.append(item)
+
+    # The quality-pairing workbook intentionally remains subscription-first, but
+    # both UgPhone and VSPhone now emit auto-renew on/off prices. Build the
+    # non-subscription lines from strict products history so Figure 2 can switch
+    # purchase mode without mixing the two prices into one series. VSPhone lines
+    # inherit every applicable UgPhone pairing group from their subscription line.
+    non_subscription_seen: set[tuple[str, str, str, str, str]] = set()
+    for (platform, product_key, signature_no_android, bucket_key), hist_points in sorted(history.items()):
+        if platform not in PURCHASE_MODE_PLATFORMS:
+            continue
+        if purchase_mode_from_signature(platform, signature_no_android) != PURCHASE_MODE_NON_SUBSCRIPTION:
+            continue
+        if not hist_points:
+            continue
+
+        sample = next(iter(hist_points.values()))
+        product_model = sample.get("product_model") or product_key
+        duration_display = sample.get("actual_duration_display") or sample.get("duration_display") or (
+            f"{bucket_key}天" if bucket_key in {str(v) for v in FRONTEND_CORE_BUCKETS} else "其他"
+        )
+        points = merge_series_points([], hist_points)
+        strict_key = (platform, product_key, signature_no_android, bucket_key)
+        regional_points = merge_regional_points_map(regional_history.get(strict_key, {}) or {})
+
+        if platform == BASE_PLATFORM:
+            pairing_refs = [{
+                "ug_config_id": f"ug_product_model::{normalize_display_text(product_model)}",
+                "ug_config_ids": [
+                    f"ug_product_model::{normalize_display_text(product_model)}",
+                    "history_non_subscription",
+                ],
+                "ug_product_model": normalize_display_text(product_model),
+                "comparability_level": "base",
+                "config_similarity_score": 100,
+                "config": "UgPhone 非订阅价格",
+            }]
+        else:
+            refs = []
+            for candidate in series:
+                if normalize_platform_name(candidate.get("platform")) != platform:
+                    continue
+                if normalize_series_product(candidate.get("product_model")) != product_key:
+                    continue
+                if str(candidate.get("duration_bucket")) != str(bucket_key):
+                    continue
+                if normalize_purchase_mode(platform, candidate.get("purchase_mode")) != PURCHASE_MODE_SUBSCRIPTION:
+                    continue
+                refs.append(candidate)
+            pairing_refs = []
+            seen_pairings: set[str] = set()
+            for ref in refs:
+                ref_ids = [str(value) for value in (ref.get("ug_config_ids") or []) if value not in {None, ""}]
+                if ref.get("ug_config_id") not in {None, ""}:
+                    ref_ids.insert(0, str(ref.get("ug_config_id")))
+                ref_ids = list(dict.fromkeys(ref_ids)) or ["history_non_subscription"]
+                pairing_key = "||".join(sorted(ref_ids))
+                if pairing_key in seen_pairings:
+                    continue
+                seen_pairings.add(pairing_key)
+                pairing_refs.append({
+                    "ug_config_id": ref.get("ug_config_id") or ref_ids[0],
+                    "ug_config_ids": list(dict.fromkeys(ref_ids + ["history_non_subscription"])),
+                    "ug_product_model": ref.get("ug_product_model"),
+                    "comparability_level": ref.get("comparability_level") or "historical_unmatched",
+                    "config_similarity_score": ref.get("config_similarity_score"),
+                    "config": f"{platform} 非订阅价格 / {ref.get('config') or '历史 products.csv'}",
+                })
+            if not pairing_refs:
+                pairing_refs = [{
+                    "ug_config_id": "history_non_subscription",
+                    "ug_config_ids": ["history_non_subscription"],
+                    "ug_product_model": None,
+                    "comparability_level": "historical_unmatched",
+                    "config_similarity_score": None,
+                    "config": f"{platform} 非订阅价格",
+                }]
+
+        for pairing_ref in pairing_refs:
+            pairing_id = str(pairing_ref.get("ug_config_id") or "history_non_subscription")
+            seen_key = (platform, product_key, signature_no_android, bucket_key, pairing_id)
+            if seen_key in non_subscription_seen:
+                continue
+            non_subscription_seen.add(seen_key)
+            android_breakdown_series = build_android_breakdown_series_for_item(
+                platform=platform,
+                product_model=product_model,
+                product_key=product_key,
+                bucket_key=bucket_key,
+                signature_no_android=signature_no_android,
+                ug_config_id_value=pairing_ref.get("ug_config_id"),
+                duration_display=duration_display,
+                comparability_level=pairing_ref.get("comparability_level") or "historical_unmatched",
+                config_similarity_score=pairing_ref.get("config_similarity_score"),
+                ug_product_model_value=pairing_ref.get("ug_product_model"),
+                purchase_mode=PURCHASE_MODE_NON_SUBSCRIPTION,
+            )
+            item = {
+                "series_id": compact_series_id(
+                    platform,
+                    product_model,
+                    "non_subscription",
+                    pairing_id,
+                    signature_no_android,
+                    bucket_key,
+                ),
+                "platform": platform,
+                "product_model": normalize_display_text(product_model),
+                "ug_product_model": json_safe(pairing_ref.get("ug_product_model")),
+                "config": pairing_ref.get("config"),
+                "ug_config_id": json_safe(pairing_ref.get("ug_config_id")),
+                "ug_config_ids": json_safe(pairing_ref.get("ug_config_ids") or []),
+                "duration_bucket": json_safe(bucket_key),
+                "duration_display": duration_display,
+                "actual_duration_days": sample.get("actual_duration_days"),
+                "actual_duration_display": sample.get("actual_duration_display"),
+                "comparison_duration_note": sample.get("comparison_duration_note"),
+                "comparability_level": pairing_ref.get("comparability_level") or "historical_unmatched",
+                "config_similarity_score": json_safe(pairing_ref.get("config_similarity_score")),
+                "line_name": normalize_display_text(f"{platform} {product_model} {duration_display}"),
+                "color": PLATFORM_COLORS.get(platform, "#64748b"),
+                "current_price": None,
+                "previous_price": None,
+                "seven_day_avg_price": None,
+                "seven_day_sample_count": 0,
+                "thirty_day_avg_price": None,
+                "thirty_day_sample_count": 0,
+                "price_change_pct": None,
+                "price_source": "historical_products_non_subscription",
+                "points": points,
+                "region_display_mode": "merged_all_regions",
+                "regional_points": regional_points,
+                "available_regions": sorted(regional_points.keys()),
+                "android_breakdown_series": android_breakdown_series,
+                "android_versions": sorted({
+                    str(child.get("android_version"))
+                    for child in android_breakdown_series
+                    if child.get("android_version") not in {None, ""}
+                }, key=android_version_sort_key),
+                "merged_android_versions": sorted({
+                    str(child.get("android_version"))
+                    for child in android_breakdown_series
+                    if child.get("android_version") not in {None, ""}
+                }, key=android_version_sort_key),
+                "purchase_mode": PURCHASE_MODE_NON_SUBSCRIPTION,
+            }
+            update_series_stats_from_points(item)
+            series.append(item)
 
     # Final safety migration: if stale historical rows still carry bucket="other"
     # but their display/actual duration is now a core bucket (3/15/60天), move
@@ -3826,7 +4893,7 @@ def build_price_trends(
     other_paid_prices = [migrate_duration_bucket_fields(item) for item in other_paid_prices]
 
     series = merge_equivalent_android_price_series(series)
-    series, date_axis_meta = apply_natural_day_axis(series)
+    series, date_axis_meta = apply_natural_day_axis(series, collection_coverage=collection_coverage)
     history_dates = sorted({point.get("date") for item in series for point in item.get("points", []) if is_iso_date_label(point.get("date"))})
     history_point_count = sum(1 for item in series for point in item.get("points", []) if is_iso_date_label(point.get("date")))
     regional_history_point_count = sum(
@@ -3867,7 +4934,7 @@ def build_price_trends(
         "duration_comparison_rule": "LDCloud has no true 7-day SKU in the monitored data; its 8-day SKU is mapped to the 7-day bucket for comparison while preserving actual 8-day display/audit fields.",
         "core_price_rule": "core trend uses the majority-region current purchasable single-device paid price for the same platform/product/duration/non-Android config; if region counts tie, the lower price wins; new-user, unavailable, multi-device, trial and flash prices do not drive the core trend",
         "regional_price_rule": "when the same product differs by machine room/region, core trend selects the price covering the most purchasable machine rooms; lower or higher minority-region prices are exported as other_paid_prices",
-        "date_axis_rule": "charts display every natural day from first to latest collection date; days without collection carry forward the latest collection-day price and are marked price_source=carry_forward",
+        "date_axis_rule": "charts display every natural day; ordinary products keep the latest valid observed price when a later run does not capture that product, Android version or region. Carry-forward preserves source_collection_date and is not treated as a new observation. Long-retired UgPhone 15-day products are suppressed in Figure 2 rather than inferred from one missing run.",
         "merged_android_duplicate_series_count": merged_series_count,
         "android_breakdown_series_count": android_breakdown_series_count,
         "android_breakdown_rule": "when products expose multiple Android versions under the same product/duration/non-Android config, android_breakdown_series preserves product × Android version and product × Android version × region historical points for the frontend expanded mode",
@@ -3945,7 +5012,30 @@ def export_dashboard_data(output_dir: Path, mirror_dirs: list[Path] | None = Non
     relative = read_excel_sheet(quality_path, "UG相对竞品指数", RELATIVE_COLS)
     pairings = read_excel_sheet(quality_path, "配置配对建议", PAIRING_COLS)
     rationality = read_excel_sheet(quality_path, "变价合理性判断", RATIONALITY_COLS)
+
+    # A failed platform collection can yield an empty or header-only quality sheet.
+    # Keep export deterministic: represent absent columns as nulls, then let the
+    # downstream quality gate decide whether publishing is allowed.
+    for column in set(QUALITY_COLS.values()):
+        if column not in details.columns:
+            details[column] = pd.NA
+    for column in set(RELATIVE_COLS.values()):
+        if column not in relative.columns:
+            relative[column] = pd.NA
+    for column in set(PAIRING_COLS.values()):
+        if column not in pairings.columns:
+            pairings[column] = pd.NA
+    for column in set(RATIONALITY_COLS.values()):
+        if column not in rationality.columns:
+            rationality[column] = pd.NA
+
     details, pairings = enrich_ids(details, pairings)
+
+    current_price_snapshot = build_current_price_snapshot(output_dir)
+    details, current_detail_overlay = overlay_quality_details_from_current_snapshot(details, current_price_snapshot)
+    rationality, current_rationality_overlay_rows = overlay_rationality_from_current_snapshot(
+        rationality, current_price_snapshot
+    )
 
     decisions = build_price_decision(relative, details)
     baskets = attach_decision_context(build_competitor_basket(details), decisions)
@@ -3961,10 +5051,20 @@ def export_dashboard_data(output_dir: Path, mirror_dirs: list[Path] | None = Non
         "last_run_at_utc": run_summary.get("end_time_utc"),
         "last_run_date": output_run_date(output_dir),
         "safe_data_only": True,
+        "current_price_authority": "current_run_products_table",
+        "current_price_snapshot_file": "current_price_snapshot.json",
+        "current_price_data_revision": current_price_snapshot.get("data_revision"),
+        "current_price_overlay_rows": {
+            **current_detail_overlay,
+            "rationality_rows": current_rationality_overlay_rows,
+        },
     }
     pairing_records = build_pairing_evidence_records(pairings)
     price_changes = build_price_change_tracking(rationality)
-    duration_comparison = attach_price_change_flags(build_duration_price_comparison(details), price_changes)
+    duration_comparison = attach_price_change_flags(
+        build_duration_price_comparison(details, current_snapshot=current_price_snapshot),
+        price_changes,
+    )
 
     price_trends_payload, price_trends_chunk_payloads = split_price_trends_detail_payloads(
         build_price_trends(price_changes, duration_comparison, meta)
@@ -3981,6 +5081,9 @@ def export_dashboard_data(output_dir: Path, mirror_dirs: list[Path] | None = Non
         "metric_definitions.json": METRIC_DEFINITIONS,
         "admin_diagnostics.json": build_admin_diagnostics(run_summary, platform_rows, details, rationality),
         "meta.json": meta,
+        "current_price_snapshot.json": {
+            key: value for key, value in current_price_snapshot.items() if key != "lookup"
+        },
         "kpis.json": build_kpis(run_summary, decisions, platform_rows),
         "files.json": build_files(output_dir, DASHBOARD_JSON_FILES),
         "platform_status.json": platform_rows,

@@ -27,6 +27,7 @@ class ProductRecord(BaseModel):
     discount_price: Optional[str] = None
     billing_period: Optional[str] = None
     duration: Optional[str] = None
+    purchase_mode: Optional[str] = None
     stock_status: Optional[str] = None
     promotion_text: Optional[str] = None
     promotion_start_time: Optional[str] = None
@@ -51,6 +52,7 @@ class ProductRecord(BaseModel):
             "android_version": self.android_version,
             "billing_period": self.billing_period,
             "duration": self.duration,
+            "purchase_mode": self.purchase_mode,
             "price": self.price,
             "currency": self.currency,
         }

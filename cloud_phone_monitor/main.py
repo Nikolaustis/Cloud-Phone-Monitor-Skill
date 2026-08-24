@@ -15,7 +15,13 @@ from cloud_phone_monitor.scrapers.ldcloud import LDCloudScraper
 from cloud_phone_monitor.scrapers.redfinger import RedfingerScraper
 from cloud_phone_monitor.scrapers.ugphone import UGPhoneScraper
 from cloud_phone_monitor.scrapers.vsphone import VSPhoneScraper
-from cloud_phone_monitor.utils.browser import launch_browser, new_browser_context
+from cloud_phone_monitor.utils.browser import (
+    launch_browser,
+    load_ugphone_runtime_context,
+    new_browser_context,
+    new_persistent_browser_context,
+    runtime_context_summary,
+)
 from cloud_phone_monitor.utils.baseline import (
     build_baseline_with_current_overlay,
     load_products_table,
@@ -52,6 +58,20 @@ PLATFORM_AUTH_STATES = {
     "UgPhone": Path("output") / "auth" / "ugphone_state.json",
     LEGACY_UG_PLATFORM: Path("output") / "auth" / "ugphone_state.json",
 }
+# UgPhone can retain auth in browser-backed stores that Playwright storage_state
+# does not fully restore. A verified persistent profile is therefore preferred.
+PLATFORM_PERSISTENT_PROFILES = {
+    "UgPhone": Path("output") / "auth" / "ugphone_profile",
+    LEGACY_UG_PLATFORM: Path("output") / "auth" / "ugphone_profile",
+}
+# UgPhone price/region calls can initialise from sessionStorage and transient
+# browser state not represented in Playwright storage_state.  This private local
+# runtime snapshot is captured by the verified login helper and injected before
+# the scheduled collector navigates to purchaseDevice.
+PLATFORM_RUNTIME_CONTEXTS = {
+    "UgPhone": Path("output") / "auth" / "ugphone_runtime_context.json",
+    LEGACY_UG_PLATFORM: Path("output") / "auth" / "ugphone_runtime_context.json",
+}
 EXPORT_COLUMNS = [
     "platform",
     "source_url",
@@ -72,6 +92,7 @@ EXPORT_COLUMNS = [
     "discount_price",
     "billing_period",
     "duration",
+    "purchase_mode",
     "stock_status",
     "promotion_text",
     "promotion_start_time",
@@ -339,6 +360,23 @@ def platform_storage_state(platform: str) -> Path | None:
     return None
 
 
+def platform_persistent_profile(platform: str) -> Path | None:
+    path = PLATFORM_PERSISTENT_PROFILES.get(platform)
+    if path is None or not path.exists():
+        return None
+    try:
+        return path if any(path.iterdir()) else None
+    except Exception:
+        return None
+
+
+def platform_runtime_context(platform: str) -> Path | None:
+    path = PLATFORM_RUNTIME_CONTEXTS.get(platform)
+    if path and path.exists():
+        return path
+    return None
+
+
 def write_outputs(
     output_dir: Path,
     records: List[ProductRecord],
@@ -498,7 +536,7 @@ def main() -> None:
     logger.info("Output directory: %s", output_dir)
     logger.info("Headless: %s", config.headless)
 
-    with launch_browser(headless=config.headless, storage_state=config.storage_state) as (_, browser, context):
+    with launch_browser(headless=config.headless, storage_state=config.storage_state) as (pw, browser, context):
         if config.login_wait_seconds > 0:
             login_pages = []
             for name, target in config.selected_targets().items():
@@ -535,13 +573,50 @@ def main() -> None:
             scraper_context = context
             close_scraper_context = False
             state_path = None
+            profile_path = None
+            runtime_context_path = None
+            runtime_context = None
             if config.storage_state is None:
-                state_path = platform_storage_state(name)
-                if state_path is not None:
-                    scraper_context = new_browser_context(browser, state_path)
+                profile_path = platform_persistent_profile(name)
+                if profile_path is not None:
+                    runtime_context_path = platform_runtime_context(name)
+                    runtime_context = load_ugphone_runtime_context(runtime_context_path)
+                    scraper_context = new_persistent_browser_context(
+                        pw,
+                        profile_path,
+                        headless=config.headless,
+                        ugphone_runtime_context=runtime_context if name in {"UgPhone", LEGACY_UG_PLATFORM} else None,
+                    )
                     close_scraper_context = True
-                    run_summary.setdefault("platform_storage_states", {})[name] = str(state_path)
-                    logger.info("[%s] using platform storage state: %s", name, state_path)
+                    run_summary.setdefault("platform_persistent_profiles", {})[name] = str(profile_path)
+                    if runtime_context_path is not None:
+                        run_summary.setdefault("platform_runtime_contexts", {})[name] = {
+                            "path": str(runtime_context_path),
+                            "loaded": bool(runtime_context),
+                            "summary": runtime_context_summary(runtime_context),
+                        }
+                    logger.info("[%s] using persistent browser profile: %s", name, profile_path)
+                    if name in {"UgPhone", LEGACY_UG_PLATFORM}:
+                        logger.info("[%s] UgPhone runtime context loaded: %s", name, bool(runtime_context))
+                else:
+                    state_path = platform_storage_state(name)
+                    if state_path is not None:
+                        runtime_context_path = platform_runtime_context(name)
+                        runtime_context = load_ugphone_runtime_context(runtime_context_path)
+                        scraper_context = new_browser_context(
+                            browser,
+                            state_path,
+                            ugphone_runtime_context=runtime_context if name in {"UgPhone", LEGACY_UG_PLATFORM} else None,
+                        )
+                        close_scraper_context = True
+                        run_summary.setdefault("platform_storage_states", {})[name] = str(state_path)
+                        if runtime_context_path is not None:
+                            run_summary.setdefault("platform_runtime_contexts", {})[name] = {
+                                "path": str(runtime_context_path),
+                                "loaded": bool(runtime_context),
+                                "summary": runtime_context_summary(runtime_context),
+                            }
+                        logger.info("[%s] using platform storage state: %s", name, state_path)
             scraper = scraper_cls(scraper_context, target, config, output_dir, logger)
             try:
                 records = scraper.scrape()

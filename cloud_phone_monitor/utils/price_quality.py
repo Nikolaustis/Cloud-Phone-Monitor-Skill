@@ -1271,6 +1271,29 @@ def build_daily_near_config_comparison(details: pd.DataFrame) -> pd.DataFrame:
     return details[cols].copy()
 
 
+def subscription_default_quality_rows(frame: pd.DataFrame) -> pd.DataFrame:
+    """Keep subscription rows for mode-aware platforms in core comparisons.
+
+    UgPhone and VSPhone now both store auto-renew on/off prices. Existing
+    quality pairings and the composite index remain subscription-based, so this
+    layer must exclude their non-subscription rows while preserving Redfinger
+    and LDCloud standard prices. Legacy UgPhone/VSPhone rows without
+    purchase_mode were collected with auto-renew enabled and remain valid.
+    """
+    if frame is None or frame.empty:
+        return frame
+    working = frame.copy()
+    if "platform" not in working.columns:
+        return working
+    platform = working["platform"].map(normalize_platform_name)
+    if "purchase_mode" not in working.columns:
+        return working
+    mode = working["purchase_mode"].fillna("").astype(str).str.strip().str.lower().str.replace("-", "_", regex=False)
+    non_subscription = mode.isin({"non_subscription", "nonsubscription", "one_time", "onetime", "single_purchase", "off", "false", "0"})
+    mode_aware = platform.isin({BASE_PLATFORM, "VSPhone"})
+    return working[~(mode_aware & non_subscription)].copy()
+
+
 def write_quality_price_report(
     output_dir: Path,
     current_df: pd.DataFrame,
@@ -1281,6 +1304,7 @@ def write_quality_price_report(
     if not config.get("enabled", True):
         return {"enabled": False, "reason": "disabled_by_config"}, pd.DataFrame(columns=DAILY_NEAR_CONFIG_COLUMNS)
 
+    current_df = subscription_default_quality_rows(current_df)
     current = add_standardized_price_fields(current_df, int(config.get("effective_period_days", EFFECTIVE_PERIOD_DAYS)))
     current["_row_id"] = list(range(len(current)))
     base_platform = normalize_platform_name(config.get("base_platform", BASE_PLATFORM))
@@ -1292,7 +1316,7 @@ def write_quality_price_report(
     baseline = None
     if baseline_df is not None and not baseline_df.empty:
         baseline = add_standardized_price_fields(
-            baseline_df,
+            subscription_default_quality_rows(baseline_df),
             int(config.get("effective_period_days", EFFECTIVE_PERIOD_DAYS)),
         )
 

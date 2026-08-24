@@ -1,7 +1,9 @@
 from __future__ import annotations
 
+import argparse
 import json
-from datetime import datetime
+import re
+from datetime import datetime, timezone
 from pathlib import Path
 
 import pandas as pd
@@ -10,49 +12,154 @@ from cloud_phone_monitor.utils.dashboard_export import export_dashboard_data, ou
 from cloud_phone_monitor.utils.price_quality import write_quality_price_report
 
 
-def _candidate_sort_key(path: Path) -> tuple[str, float, int]:
-    """Sort output candidates by the local/display collection day, not UTC.
-
-    output/latest can be stale after a manual run, while a newer
-    output/cloud_phone_monitor_YYYYMMDD_* directory already exists.  Picking
-    output/latest first is why rebuilt dashboard data could remain stuck on the
-    previous day.
-    """
-    date_label = output_run_date(path) or "0000-00-00"
-    # Directory names include HHMMSS and sort correctly within one date; use mtime
-    # as an additional fallback for output/latest.
+def _parse_run_timestamp(value: object) -> float | None:
+    text = str(value or "").strip()
+    if not text:
+        return None
     try:
-        mtime = path.stat().st_mtime
+        parsed = datetime.fromisoformat(text.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=timezone.utc)
+    return parsed.timestamp()
+
+
+def _run_timestamp(path: Path) -> float:
+    """Return the collection timestamp without using directory mtime.
+
+    Rebuilding a historical run creates/updates ``dashboard_data`` and changes the
+    directory mtime.  Directory mtime therefore cannot be used to decide which
+    collection is newest.  Prefer the run summary, then the timestamp encoded in
+    a real run directory, and only then the products file mtime.
+    """
+    summary_path = path / "run_summary.json"
+    try:
+        summary = json.loads(summary_path.read_text(encoding="utf-8"))
     except Exception:
-        mtime = 0.0
-    # Prefer real timestamped run directories over output/latest when dates tie,
-    # because latest may be a stale copy.
-    real_run = 1 if path.name.startswith("cloud_phone_monitor_") else 0
-    return (date_label, mtime, real_run)
+        summary = {}
+    for key in (
+        "end_time_utc",
+        "end_time_local",
+        "start_time_utc",
+        "start_time_local",
+        "generated_at_utc",
+        "generated_at_local",
+    ):
+        stamp = _parse_run_timestamp(summary.get(key))
+        if stamp is not None:
+            return stamp
+
+    match = re.fullmatch(r"cloud_phone_monitor_(\d{8})_(\d{6})(?:_.*)?", path.name)
+    if match:
+        try:
+            parsed = datetime.strptime("".join(match.groups()), "%Y%m%d%H%M%S")
+            return parsed.replace(tzinfo=timezone.utc).timestamp()
+        except ValueError:
+            pass
+
+    for name in ("products.csv", "products.xlsx", "run_summary.json"):
+        source = path / name
+        if source.exists():
+            try:
+                return source.stat().st_mtime
+            except OSError:
+                continue
+    return 0.0
+
+
+def _normalize_platform(value: object) -> str:
+    text = str(value or "").strip()
+    return "UgPhone" if text.lower() == "ugphone" else text
+
+
+def _source_platforms(path: Path) -> set[str]:
+    summary_path = path / "run_summary.json"
+    try:
+        summary = json.loads(summary_path.read_text(encoding="utf-8"))
+        counts = summary.get("records_by_platform") or {}
+        platforms = {
+            _normalize_platform(name)
+            for name, count in counts.items()
+            if int(count or 0) > 0
+        }
+        if platforms:
+            return platforms
+    except Exception:
+        pass
+
+    csv_path = path / "products.csv"
+    try:
+        if csv_path.exists():
+            frame = pd.read_csv(csv_path, usecols=["platform"], dtype=object)
+            return {_normalize_platform(value) for value in frame["platform"].dropna().unique()}
+    except Exception:
+        pass
+    return set()
+
+
+def _is_complete_current_source(path: Path) -> bool:
+    required = {"UgPhone", "VSPhone", "Redfinger", "LDCloud"}
+    return required.issubset(_source_platforms(path))
+
+
+def _candidate_sort_key(path: Path) -> tuple[float, int]:
+    # If exact collection timestamps tie, output/latest wins because it is the
+    # explicitly promoted complete dataset.  Never use directory mtime here.
+    return (_run_timestamp(path), 1 if path.name == "latest" else 0)
 
 
 def _has_dashboard_source(path: Path) -> bool:
-    return any((path / name).exists() for name in [
-        "quality_price_report.xlsx",
-        "products.csv",
-        "products.xlsx",
-    ])
+    return (path / "products.csv").exists() or (path / "products.xlsx").exists()
 
 
 def candidate_output_dirs() -> list[Path]:
     root = Path("output")
     candidates: list[Path] = []
     latest = root / "latest"
-    if latest.exists() and _has_dashboard_source(latest):
+    if latest.exists() and _has_dashboard_source(latest) and _is_complete_current_source(latest):
         candidates.append(latest)
     if root.exists():
         for item in root.glob("cloud_phone_monitor_*"):
-            if item.is_dir() and _has_dashboard_source(item):
+            if (
+                item.is_dir()
+                and _has_dashboard_source(item)
+                and _is_complete_current_source(item)
+            ):
                 candidates.append(item)
-    # Newest UTC+8 business collection date first.  This allows a May 8 run
-    # directory to be selected even if its run_summary UTC date is still May 7
-    # or output/latest points to the previous run.
     return sorted(candidates, key=_candidate_sort_key, reverse=True)
+
+
+def parse_args() -> argparse.Namespace:
+    parser = argparse.ArgumentParser(
+        description="Rebuild dashboard history from the newest complete four-platform output."
+    )
+    parser.add_argument(
+        "--output",
+        default=None,
+        help="Explicit complete output directory, for example output/latest.",
+    )
+    return parser.parse_args()
+
+
+def resolve_output_dir(explicit: str | None) -> tuple[Path, list[Path]]:
+    candidates = candidate_output_dirs()
+    if explicit:
+        selected = Path(explicit)
+        if not selected.exists() or not _has_dashboard_source(selected):
+            raise SystemExit(f"指定的输出目录不可用: {selected}")
+        if not _is_complete_current_source(selected):
+            platforms = sorted(_source_platforms(selected))
+            raise SystemExit(
+                f"指定目录不是完整四平台数据: {selected}; detected={platforms}"
+            )
+        return selected, [selected, *[item for item in candidates if item.resolve() != selected.resolve()]]
+    if not candidates:
+        raise SystemExit(
+            "没有找到完整四平台 output。需要 output/latest 或 "
+            "output/cloud_phone_monitor_* 中同时包含 UgPhone、VSPhone、Redfinger、LDCloud。"
+        )
+    return candidates[0], candidates
 
 
 def read_products_for_quality(path: Path) -> pd.DataFrame:
@@ -95,13 +202,8 @@ def refresh_quality_report_if_possible(output_dir: Path) -> None:
 
 
 def main() -> None:
-    candidates = candidate_output_dirs()
-    if not candidates:
-        raise SystemExit(
-            "没有找到可用于重建看板的 output 目录。需要 output/latest/quality_price_report.xlsx "
-            "或 output/cloud_phone_monitor_*/quality_price_report.xlsx。"
-        )
-    output_dir = candidates[0]
+    args = parse_args()
+    output_dir, candidates = resolve_output_dir(args.output)
     print(f"使用输出目录重建看板数据: {output_dir}")
     print(f"识别到的本次数据日期: {output_run_date(output_dir)}")
     if len(candidates) > 1:
@@ -113,6 +215,29 @@ def main() -> None:
         output_dir,
         mirror_dirs=[Path("dashboard/public/dashboard_data"), Path("dashboard/dist/dashboard_data")],
     )
+    meta_path = dashboard_dir / "meta.json"
+    snapshot_path = dashboard_dir / "current_price_snapshot.json"
+    if not meta_path.exists() or not snapshot_path.exists():
+        raise RuntimeError("Dashboard current-price authority files were not generated.")
+    meta_payload = json.loads(meta_path.read_text(encoding="utf-8"))
+    snapshot_payload = json.loads(snapshot_path.read_text(encoding="utf-8"))
+    if meta_payload.get("current_price_authority") != "current_run_products_table":
+        raise RuntimeError("Dashboard current prices are not anchored to the current products table.")
+    print("当前价格权威来源:", meta_payload.get("current_price_authority"))
+    print("当前价格数据版本:", meta_payload.get("current_price_data_revision"))
+    print("当前价格来源目录:", snapshot_payload.get("source_output_dir"))
+    print("当前价格快照行数:", len(snapshot_payload.get("rows") or []))
+    vs_vip_30 = sorted({
+        row.get("price")
+        for row in (snapshot_payload.get("rows") or [])
+        if row.get("platform") == "VSPhone"
+        and str(row.get("product_model") or "").upper() == "VIP"
+        and float(row.get("duration_days") or 0) == 30
+        and row.get("purchase_mode") == "subscription"
+    })
+    if vs_vip_30:
+        print("VSPhone VIP 30天订阅价（本次 products.csv）:", vs_vip_30)
+
     trends_path = dashboard_dir / "price_trends.json"
     if trends_path.exists():
         payload = json.loads(trends_path.read_text(encoding="utf-8"))
