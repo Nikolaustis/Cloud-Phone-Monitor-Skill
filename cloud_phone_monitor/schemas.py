@@ -5,8 +5,20 @@ from typing import Any, Dict, Optional
 
 from pydantic import BaseModel, Field
 
+from cloud_phone_monitor.data_contracts import (
+    DataOrigin,
+    SCHEMA_VERSION,
+    canonical_product_key,
+    infer_availability_status,
+)
+
 
 class ProductRecord(BaseModel):
+    schema_version: int = SCHEMA_VERSION
+    dataset_role: str = "current"
+    data_origin: str = DataOrigin.CURRENT_OBSERVED.value
+    availability_status: str = "unknown"
+    canonical_product_key: str = ""
     platform: str = ""
     source_url: str = ""
     crawl_time_utc: str = ""
@@ -60,6 +72,11 @@ class ProductRecord(BaseModel):
         return hashlib.sha256(data.encode("utf-8")).hexdigest()[:24]
 
     def finalize(self) -> "ProductRecord":
+        self.schema_version = SCHEMA_VERSION
+        self.dataset_role = "current"
+        self.data_origin = DataOrigin.CURRENT_OBSERVED.value
+        self.availability_status = infer_availability_status(self.stock_status, self.price)
+        self.canonical_product_key = canonical_product_key(self.model_dump())
         self.record_hash = self.compute_hash()
         return self
 

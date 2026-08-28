@@ -16,6 +16,7 @@ from playwright.sync_api import Page, TimeoutError as PlaywrightTimeoutError
 
 from cloud_phone_monitor.schemas import ProductRecord
 from cloud_phone_monitor.scrapers.base import BaseScraper
+from cloud_phone_monitor.utils.normalize import canonical_android_version
 from cloud_phone_monitor.utils.normalize import compact_text, now_pair
 
 
@@ -78,6 +79,11 @@ class UGPhoneScraper(BaseScraper):
             "missing_non_subscription_counterparts": [],
             "missing_subscription_counterparts": [],
             "purchase_mode_skipped": [],
+            "plan_activation_failures": 0,
+            "version_list_failures": 0,
+            "version_activation_failures": 0,
+            "region_list_failures": 0,
+            "price_cards_missing_after_full_selection": 0,
             "returned_record_count": 0,
             "coverage_complete": False,
             "coverage_status": "unknown",
@@ -318,6 +324,11 @@ class UGPhoneScraper(BaseScraper):
                 "missing_non_subscription_counterparts": [],
                 "missing_subscription_counterparts": [],
                 "purchase_mode_skipped": [],
+                "plan_activation_failures": 0,
+                "version_list_failures": 0,
+                "version_activation_failures": 0,
+                "region_list_failures": 0,
+                "price_cards_missing_after_full_selection": 0,
             }
         )
         snapshots: list[dict[str, Any]] = []
@@ -325,34 +336,71 @@ class UGPhoneScraper(BaseScraper):
         trace: list[dict[str, Any]] = []
 
         for plan_index, plan_entry in enumerate(plan_entries):
-            # _entries() returns ``name``.  Reading a non-existent ``label``
-            # produced synthetic values such as plan_0, which could never match
-            # the actual active tab text (UVIP/GVIP/KVIP/MVIP/SVIP).
+            # Plan activation and price rendering are separate states on UgPhone.
+            # A plan with multiple Android variants can legitimately have no price
+            # cards immediately after the plan tab is selected because the Vue
+            # component is still carrying the previous plan's region/version.
+            # Therefore never require plan-level cards before entering the
+            # Android -> region matrix.
             target_plan = str(
                 plan_entry.get("name") or plan_entry.get("label") or f"plan_{plan_index}"
             )
-            if not self._click_selector(page, ".purchase-details-container .van-tabs [role='tab']", plan_index):
-                skipped.append({"plan": target_plan, "reason": "plan_click_failed"})
+            api_versions = self._api_version_entries_for_plan(target_plan)
+
+            plan_state: dict[str, Any] = {}
+            for plan_attempt in range(3):
+                if not self._click_selector(
+                    page, ".purchase-details-container .van-tabs [role='tab']", plan_index
+                ):
+                    if plan_attempt == 2:
+                        skipped.append({"plan": target_plan, "reason": "plan_click_failed"})
+                    page.wait_for_timeout(600)
+                    continue
+                plan_state = self._wait_for_rendered_state(
+                    page,
+                    expected_plan=target_plan,
+                    timeout_ms=8_000,
+                    allow_empty_cards=True,
+                    stable_frames_required=2,
+                )
+                if plan_state and self._matches_selection(plan_state.get("active_plan"), target_plan):
+                    break
+                page.wait_for_timeout(700)
+
+            if not plan_state or not self._matches_selection(plan_state.get("active_plan"), target_plan):
+                self.collection_summary["plan_activation_failures"] = int(
+                    self.collection_summary.get("plan_activation_failures") or 0
+                ) + 1
+                skipped.append(
+                    {
+                        "plan": target_plan,
+                        "reason": "plan_activation_failed",
+                        "observed_plan": (plan_state or {}).get("active_plan"),
+                        "observed_version": (plan_state or {}).get("active_version"),
+                        "observed_region": (plan_state or {}).get("active_region"),
+                        "cards": len((plan_state or {}).get("cards") or []),
+                    }
+                )
                 continue
 
-            plan_state = self._wait_for_rendered_state(page, expected_plan=target_plan, timeout_ms=10_000)
-            if not plan_state or not plan_state.get("cards"):
-                # One controlled retry after the Vue component has had time to
-                # dispose/rebuild its previous child tree.
-                page.wait_for_timeout(900)
-                self._click_selector(page, ".purchase-details-container .van-tabs [role='tab']", plan_index)
-                plan_state = self._wait_for_rendered_state(page, expected_plan=target_plan, timeout_ms=10_000)
-
-            active_plan = str((plan_state or {}).get("active_plan") or target_plan)
-            if not plan_state or not plan_state.get("cards"):
-                skipped.append({"plan": target_plan, "reason": "price_cards_missing_after_plan_sync"})
-                continue
-
-            versions = plan_state.get("versions") or []
+            active_plan = str(plan_state.get("active_plan") or target_plan)
+            versions, plan_state = self._resolve_plan_versions(
+                page, target_plan=target_plan, initial_state=plan_state, api_versions=api_versions
+            )
             if not versions:
-                # This current UgPhone layout has no .version-item selector.
-                # Treat the rendered configuration as one visible default state.
-                versions = [{"index": 0, "name": plan_state.get("active_version") or "default", "active": True}]
+                self.collection_summary["version_list_failures"] = int(
+                    self.collection_summary.get("version_list_failures") or 0
+                ) + 1
+                skipped.append(
+                    {
+                        "plan": active_plan,
+                        "reason": "version_list_missing_after_plan_activation",
+                        "expected_versions": [item.get("name") for item in api_versions],
+                        "cards": len((plan_state or {}).get("cards") or []),
+                    }
+                )
+                continue
+
             self.collection_summary["dom_matrix_variant_targets"] = int(
                 self.collection_summary.get("dom_matrix_variant_targets") or 0
             ) + len(versions)
@@ -360,51 +408,75 @@ class UGPhoneScraper(BaseScraper):
             plan_variant_successes = 0
             for version_index, version in enumerate(versions):
                 version_name = str(version.get("name") or f"version_{version_index}")
+                selectorless_version = bool(version.get("selectorless"))
                 self.collection_summary["dom_matrix_variant_attempts"] = int(
                     self.collection_summary.get("dom_matrix_variant_attempts") or 0
                 ) + 1
 
-                if len(versions) > 1:
+                # If there is an actual version control, click the requested
+                # Android variant explicitly even if it appears active. This
+                # forces UgPhone to rebuild its signed request context and avoids
+                # inheriting the previous plan's region state. Selector-less
+                # UVIP/SVIP-style plans use their sole API config as metadata.
+                if not selectorless_version:
                     if not self._click_selector(page, ".purchase-details-container .version-item", version_index):
                         skipped.append(
                             {"plan": active_plan, "version": version_name, "reason": "version_click_failed"}
                         )
                         continue
 
+                expected_version = None if selectorless_version else version_name
                 variant_state = self._wait_for_rendered_state(
                     page,
                     expected_plan=target_plan,
-                    expected_version=version_name if len(versions) > 1 else None,
-                    timeout_ms=10_000,
+                    expected_version=expected_version,
+                    timeout_ms=8_000,
+                    allow_empty_cards=True,
+                    stable_frames_required=2,
                 )
-                if not variant_state or not variant_state.get("cards"):
-                    # Clicking a version is the point at which UgPhone replaces
-                    # the signed request context.  Retry only the same safe
-                    # selector, never the purchase controls.
-                    page.wait_for_timeout(900)
-                    if len(versions) > 1:
+                if not variant_state:
+                    page.wait_for_timeout(700)
+                    if not selectorless_version:
                         self._click_selector(page, ".purchase-details-container .version-item", version_index)
                     variant_state = self._wait_for_rendered_state(
                         page,
                         expected_plan=target_plan,
-                        expected_version=version_name if len(versions) > 1 else None,
-                        timeout_ms=10_000,
+                        expected_version=expected_version,
+                        timeout_ms=8_000,
+                        allow_empty_cards=True,
+                        stable_frames_required=2,
                     )
-                if not variant_state or not variant_state.get("cards"):
+                if not variant_state:
+                    self.collection_summary["version_activation_failures"] = int(
+                        self.collection_summary.get("version_activation_failures") or 0
+                    ) + 1
                     skipped.append(
                         {
                             "plan": active_plan,
                             "version": version_name,
-                            "reason": "price_cards_missing_after_version_sync",
+                            "reason": "version_activation_failed",
                         }
                     )
                     continue
 
                 active_version = str(variant_state.get("active_version") or version_name)
+                variant_state = self._wait_for_regions_for_selection(
+                    page,
+                    expected_plan=target_plan,
+                    expected_version=expected_version,
+                    timeout_ms=8_000,
+                )
                 regions = variant_state.get("regions") or []
                 if not regions:
+                    self.collection_summary["region_list_failures"] = int(
+                        self.collection_summary.get("region_list_failures") or 0
+                    ) + 1
                     skipped.append(
-                        {"plan": active_plan, "version": active_version, "reason": "regions_missing_after_version_sync"}
+                        {
+                            "plan": active_plan,
+                            "version": active_version,
+                            "reason": "regions_missing_after_full_variant_activation",
+                        }
                     )
                     continue
                 self.collection_summary["dom_matrix_region_targets"] = int(
@@ -436,14 +508,12 @@ class UGPhoneScraper(BaseScraper):
                     snapshot = self._wait_for_rendered_state(
                         page,
                         expected_plan=target_plan,
-                        expected_version=active_version if len(versions) > 1 else None,
+                        expected_version=expected_version,
                         expected_region=region_name,
                         timeout_ms=10_000,
                         allow_empty_cards=True,
                     )
                     if not snapshot:
-                        # A region may be slow to refresh under headless Chromium.
-                        # Retry this specific safe region control once.
                         page.wait_for_timeout(900)
                         self._click_selector(
                             page, ".purchase-details-container .meal-data-item .room-item", region_index
@@ -451,7 +521,7 @@ class UGPhoneScraper(BaseScraper):
                         snapshot = self._wait_for_rendered_state(
                             page,
                             expected_plan=target_plan,
-                            expected_version=active_version if len(versions) > 1 else None,
+                            expected_version=expected_version,
                             expected_region=region_name,
                             timeout_ms=10_000,
                             allow_empty_cards=True,
@@ -475,22 +545,23 @@ class UGPhoneScraper(BaseScraper):
                     mode_snapshots, mode_failures = self._capture_purchase_mode_states(
                         page,
                         expected_plan=target_plan,
-                        expected_version=active_version if len(versions) > 1 else None,
+                        expected_version=expected_version,
                         expected_region=region_name,
                     )
                     skipped.extend(mode_failures)
                     if not mode_snapshots:
-                        # The region itself was selected successfully, but neither
-                        # subscription nor one-time mode exposed a priced duration.
                         self.collection_summary["dom_matrix_empty_region_cells"] = int(
                             self.collection_summary.get("dom_matrix_empty_region_cells") or 0
+                        ) + 1
+                        self.collection_summary["price_cards_missing_after_full_selection"] = int(
+                            self.collection_summary.get("price_cards_missing_after_full_selection") or 0
                         ) + 1
                         skipped.append(
                             {
                                 "plan": active_plan,
                                 "version": active_version,
                                 "region": region_name,
-                                "reason": "resolved_no_priced_purchase_mode",
+                                "reason": "price_cards_missing_after_full_selection",
                             }
                         )
                         if len(trace) < 250:
@@ -927,6 +998,112 @@ class UGPhoneScraper(BaseScraper):
     def _version_entries(self, page: Page) -> list[dict[str, Any]]:
         return self._entries(page, ".purchase-details-container .version-item")
 
+    def _api_version_entries_for_plan(self, plan: str) -> list[dict[str, Any]]:
+        """Return passive configList2 Android variants for one visible plan.
+
+        These entries are metadata/fallback only. They do not prove that a
+        selector is visible, but they let the state machine know whether a
+        multi-version plan such as GVIP is still waiting for its version
+        controls instead of misclassifying a temporary card-less state as a
+        whole-plan failure.
+        """
+        plan_key = self._normal_key(plan)
+        rows: list[dict[str, Any]] = []
+        seen: set[str] = set()
+        for (candidate_plan, _), cfg in self._config_index.items():
+            if candidate_plan != plan_key:
+                continue
+            name = str(cfg.get("version_label") or cfg.get("android_version") or "").strip()
+            key = self._normal_key(name)
+            if not name or key in seen:
+                continue
+            seen.add(key)
+            rows.append({"name": name, "active": False, "source": "configList2"})
+
+        def sort_key(item: dict[str, Any]) -> tuple[float, str]:
+            canonical = canonical_android_version(item.get("name"))
+            match = re.search(r"(\d+(?:\.\d+)?)", str(canonical or item.get("name") or ""))
+            return (float(match.group(1)) if match else 9999.0, self._normal_key(item.get("name")))
+
+        rows.sort(key=sort_key)
+        for index, row in enumerate(rows):
+            row["index"] = index
+        return rows
+
+    def _resolve_plan_versions(
+        self,
+        page: Page,
+        *,
+        target_plan: str,
+        initial_state: dict[str, Any],
+        api_versions: list[dict[str, Any]],
+        timeout_ms: int = 8_000,
+    ) -> tuple[list[dict[str, Any]], dict[str, Any]]:
+        """Wait for Android controls after plan activation without requiring cards."""
+        attempts = max(1, int(timeout_ms / 250))
+        best = initial_state or {}
+        expected_api = {self._normal_key(item.get("name")) for item in api_versions if item.get("name")}
+        for _ in range(attempts):
+            state = self._current_purchase_state(page) or best
+            if state:
+                best = state
+            if self._matches_selection(state.get("active_plan"), target_plan):
+                versions = state.get("versions") or self._version_entries(page)
+                if versions:
+                    observed = {self._normal_key(item.get("name")) for item in versions if item.get("name")}
+                    # For multi-version plans, do not accept a stale/incomplete
+                    # version tree carried over from the previous plan.
+                    if len(api_versions) <= 1 or not expected_api or expected_api.issubset(observed):
+                        return versions, state
+                elif len(api_versions) == 1:
+                    item = dict(api_versions[0])
+                    item.update({"index": 0, "active": True, "selectorless": True})
+                    return [item], state
+                elif not api_versions:
+                    return [
+                        {
+                            "index": 0,
+                            "name": state.get("active_version") or "default",
+                            "active": True,
+                            "selectorless": True,
+                        }
+                    ], state
+            page.wait_for_timeout(250)
+        return [], best
+
+    def _wait_for_regions_for_selection(
+        self,
+        page: Page,
+        *,
+        expected_plan: str,
+        expected_version: str | None,
+        timeout_ms: int = 8_000,
+    ) -> dict[str, Any]:
+        """Wait until the selected plan/version exposes its server list.
+
+        Price cards are deliberately not part of this gate. A stale region from
+        the previous plan may have no price under the newly selected plan; the
+        scraper must first enumerate and explicitly click the new plan's regions.
+        """
+        attempts = max(1, int(timeout_ms / 250))
+        best: dict[str, Any] = {}
+        for _ in range(attempts):
+            state = self._current_purchase_state(page)
+            if state:
+                best = state
+            if (
+                self._matches_selection(state.get("active_plan"), expected_plan)
+                and self._matches_selection(state.get("active_version"), expected_version)
+                and bool(state.get("regions") or [])
+            ):
+                return state
+            page.wait_for_timeout(250)
+        return best if (
+            self._matches_selection(best.get("active_plan"), expected_plan)
+            and self._matches_selection(best.get("active_version"), expected_version)
+            and bool(best.get("regions") or [])
+        ) else {}
+
     def _entries(self, page: Page, selector: str, text_selector: str | None = None) -> list[dict[str, Any]]:
         try:
             result = page.evaluate(
@@ -1362,8 +1539,7 @@ class UGPhoneScraper(BaseScraper):
 
     @staticmethod
     def _android_version(value: Any) -> str | None:
-        match = re.search(r"(\d+(?:\.\d+)?)", str(value or ""))
-        return match.group(1) if match else None
+        return canonical_android_version(value)
 
     @staticmethod
     def _cpu(value: Any) -> str | None:

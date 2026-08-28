@@ -11,6 +11,7 @@ import pandas as pd
 
 from cloud_phone_monitor.config import MonitorConfig
 from cloud_phone_monitor.schemas import ProductRecord
+from cloud_phone_monitor.data_contracts import SCHEMA_VERSION, SKILL_RELEASE
 from cloud_phone_monitor.scrapers.ldcloud import LDCloudScraper
 from cloud_phone_monitor.scrapers.redfinger import RedfingerScraper
 from cloud_phone_monitor.scrapers.ugphone import UGPhoneScraper
@@ -29,7 +30,10 @@ from cloud_phone_monitor.utils.baseline import (
     write_baseline_monitor_outputs,
 )
 from cloud_phone_monitor.utils.dashboard_export import export_dashboard_data
+from cloud_phone_monitor.utils.collection_contract import build_collection_contract, build_run_manifest
+from cloud_phone_monitor.utils.migrations import migrate_products_frame
 from cloud_phone_monitor.utils.logger import setup_logger
+from cloud_phone_monitor.utils.normalize import canonical_android_version
 from cloud_phone_monitor.utils.price_quality import write_quality_price_report
 
 
@@ -73,6 +77,11 @@ PLATFORM_RUNTIME_CONTEXTS = {
     LEGACY_UG_PLATFORM: Path("output") / "auth" / "ugphone_runtime_context.json",
 }
 EXPORT_COLUMNS = [
+    "schema_version",
+    "dataset_role",
+    "data_origin",
+    "availability_status",
+    "canonical_product_key",
     "platform",
     "source_url",
     "crawl_time_utc",
@@ -220,7 +229,7 @@ def aggregate_supported_servers(df: pd.DataFrame) -> pd.DataFrame:
     group_columns = [
         col
         for col in EXPORT_COLUMNS
-        if col not in EVIDENCE_COLUMNS and col != "supported_server_regions"
+        if col not in EVIDENCE_COLUMNS and col not in {"supported_server_regions", "canonical_product_key"}
     ]
     grouped_rows = []
     for _, group in working.groupby(group_columns, dropna=False, sort=False):
@@ -390,6 +399,9 @@ def write_outputs(
 ) -> None:
     rows = []
     for record in records:
+        # Canonicalize before hashing/export so Android 10 and 10.0 are the same
+        # product identity from the first persisted artifact onward.
+        record.android_version = canonical_android_version(record.android_version)
         raw_row = record.finalize().as_dict()
         raw_row["platform"] = normalize_platform_name(raw_row.get("platform"))
         raw_row["supported_server_regions"] = raw_row.get("server_region")
@@ -398,7 +410,7 @@ def write_outputs(
         for col in [*EXPORT_COLUMNS, "server_region"]:
             row.setdefault(col, None)
 
-    df = aggregate_supported_servers(pd.DataFrame(rows))
+    df = migrate_products_frame(aggregate_supported_servers(pd.DataFrame(rows)), role="current")
     df.to_csv(output_dir / "products.csv", index=False, encoding="utf-8-sig")
     write_current_products_workbook(output_dir / "products.xlsx", df, PLATFORM_SHEETS, PLATFORM_SHEETS_CN)
     write_product_brief(output_dir / "product_brief.txt", df)
@@ -410,7 +422,24 @@ def write_outputs(
         run_summary["baseline_initialized"] = str(baseline_path)
     baseline_df = pd.DataFrame()
     if baseline_path is not None and baseline_path.exists():
-        baseline_df = load_products_table(baseline_path)
+        baseline_df = migrate_products_frame(load_products_table(baseline_path), role="baseline")
+
+    collection_contract = build_collection_contract(output_dir, df, baseline_df)
+    (output_dir / "collection_contract.json").write_text(
+        json.dumps(collection_contract, ensure_ascii=False, indent=2, default=str),
+        encoding="utf-8",
+    )
+    run_summary["collection_contract"] = {
+        "overall_status": collection_contract.get("overall_status"),
+        "overall_coverage_ratio": collection_contract.get("overall_coverage_ratio"),
+        "platforms": {
+            row.get("platform"): {
+                "status": row.get("status"),
+                "coverage_ratio": row.get("coverage_ratio"),
+            }
+            for row in collection_contract.get("platforms", [])
+        },
+    }
 
     ug_near_config_comparison = None
     if skip_quality_price_monitor:
@@ -452,6 +481,11 @@ def write_outputs(
     run_summary["total_records"] = len(rows)
     run_summary["records_by_platform"] = dict(Counter(normalize_platform_name(r.get("platform")) for r in rows))
     run_summary["missing_field_stats"] = make_missing_field_stats(rows)
+    run_manifest = build_run_manifest(output_dir, run_summary, collection_contract)
+    (output_dir / "run_manifest.json").write_text(
+        json.dumps(run_manifest, ensure_ascii=False, indent=2, default=str),
+        encoding="utf-8",
+    )
     (output_dir / "run_summary.json").write_text(
         json.dumps(run_summary, ensure_ascii=False, indent=2, default=str),
         encoding="utf-8",
@@ -467,6 +501,10 @@ def write_outputs(
     shutil.copy2(output_dir / "product_brief.txt", latest_dir / "product_brief.txt")
     shutil.copy2(output_dir / "products.xlsx", latest_dir / "products.xlsx")
     shutil.copy2(output_dir / "run_summary.json", latest_dir / "run_summary.json")
+    for name in ["collection_contract.json", "run_manifest.json"]:
+        source = output_dir / name
+        if source.exists():
+            shutil.copy2(source, latest_dir / name)
     keep_latest_xlsx = {
         "products.xlsx",
         "daily_changes.xlsx",
@@ -521,6 +559,8 @@ def main() -> None:
 
     logger = setup_logger(output_dir)
     run_summary = {
+        "skill_release": SKILL_RELEASE,
+        "schema_version": SCHEMA_VERSION,
         "start_time_utc": datetime.now(timezone.utc).isoformat(timespec="seconds"),
         "end_time_utc": None,
         "targets": {name: target.url for name, target in config.selected_targets().items()},

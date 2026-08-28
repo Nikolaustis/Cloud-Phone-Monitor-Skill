@@ -10,6 +10,8 @@ from typing import Iterable
 import pandas as pd
 
 from cloud_phone_monitor.utils.price_quality import QUALITY_HEADER_CN
+from cloud_phone_monitor.utils.normalize import canonical_android_version
+from cloud_phone_monitor.utils.migrations import migrate_products_frame
 
 BASE_PLATFORM = "UgPhone"
 
@@ -64,6 +66,11 @@ COMPARISON_COLUMNS = [
 ]
 
 PRODUCT_HEADER_CN = {
+    "schema_version": "数据架构版本",
+    "dataset_role": "数据角色",
+    "data_origin": "数据来源类型",
+    "availability_status": "可用性状态",
+    "canonical_product_key": "规范商品键",
     "platform": "平台",
     "source_url": "来源链接",
     "crawl_time_utc": "采集时间UTC",
@@ -328,10 +335,10 @@ def load_products_table(path: Path) -> pd.DataFrame:
             if "platform" not in frame.columns:
                 frame["platform"] = infer_platform_from_sheet(sheet_name)
             frames.append(frame)
-        return pd.concat(frames, ignore_index=True) if frames else pd.DataFrame()
+        return migrate_products_frame(pd.concat(frames, ignore_index=True), role="baseline") if frames else pd.DataFrame()
 
     if suffix == ".csv":
-        return normalize_columns(pd.read_csv(path, dtype=object))
+        return migrate_products_frame(normalize_columns(pd.read_csv(path, dtype=object)), role="baseline")
 
     if suffix == ".jsonl":
         rows = []
@@ -340,7 +347,7 @@ def load_products_table(path: Path) -> pd.DataFrame:
                 line = line.strip()
                 if line:
                     rows.append(json.loads(line))
-        return normalize_columns(pd.DataFrame(rows))
+        return migrate_products_frame(normalize_columns(pd.DataFrame(rows)), role="baseline")
 
     raise ValueError(f"Unsupported baseline file format: {path}")
 
@@ -356,6 +363,11 @@ def normalize_products(df: pd.DataFrame) -> pd.DataFrame:
     if out["supported_server_regions"].map(as_text).eq("").all() and "server_region" in out.columns:
         out["supported_server_regions"] = out["server_region"]
     out["platform"] = out["platform"].map(normalize_platform_name)
+    # Identity matching must treat spreadsheet/API renderings such as 10 and
+    # 10.0 as the same Android release.  This is especially important when a
+    # historical baseline used integer text and the current scraper returns a
+    # numeric-looking 10.0 value.
+    out["android_version"] = out["android_version"].map(canonical_android_version)
     out["_identity_key"] = out.apply(identity_key, axis=1)
     return out
 

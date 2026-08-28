@@ -33,6 +33,45 @@ DEVICE_RE = re.compile(
 SENSITIVE_HEADERS = {"authorization", "cookie", "set-cookie", "x-csrf-token", "x-xsrf-token", "token"}
 
 
+def canonical_android_version(value: Any) -> Optional[str]:
+    """Return one stable Android-version token for keys, reports and display.
+
+    Excel/pandas and some platform APIs can turn the same version into either
+    ``10`` or ``10.0``.  Those values must be identical throughout the monitor;
+    otherwise baseline/current rows and dashboard configs split into duplicates.
+    Meaningful decimals such as 8.1 are preserved.
+    """
+    if value is None:
+        return None
+    try:
+        if isinstance(value, float) and value != value:
+            return None
+    except Exception:
+        pass
+    text = str(value).strip()
+    if not text or text.lower() in {"nan", "none", "null"}:
+        return None
+    match = re.search(r"\d+(?:\.\d+)?", text)
+    if not match:
+        return text
+    token = match.group(0)
+    try:
+        number = float(token)
+    except Exception:
+        return token
+    return f"{number:g}"
+
+
+def canonicalize_android_version_column(df, column: str = "android_version"):
+    """Return a copy with one canonical Android representation in *column*."""
+    if df is None:
+        return df
+    out = df.copy()
+    if column in out.columns:
+        out[column] = out[column].map(canonical_android_version)
+    return out
+
+
 def now_pair(local_tz: str = "Asia/Shanghai") -> tuple[str, str]:
     utc = datetime.now(timezone.utc)
     local = utc.astimezone(ZoneInfo(local_tz))

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import gzip
 import hashlib
 import json
 import math
@@ -13,6 +14,25 @@ from zoneinfo import ZoneInfo
 
 import pandas as pd
 
+from cloud_phone_monitor.utils.normalize import canonical_android_version
+from cloud_phone_monitor.data_contracts import (
+    AvailabilityStatus,
+    DataOrigin,
+    DatasetRole,
+    SCHEMA_VERSION,
+    SKILL_RELEASE,
+    canonical_product_key,
+)
+from cloud_phone_monitor.utils.migrations import migrate_products_frame
+from cloud_phone_monitor.utils.history_cache import (
+    history_cache_root,
+    load_daily_cache,
+    save_daily_cache,
+    source_fingerprint,
+)
+from cloud_phone_monitor.utils.collection_contract import build_collection_contract, build_run_manifest
+from cloud_phone_monitor.utils.baseline import load_products_table
+
 
 SAFE_OUTPUT_FILES = [
     "products.csv",
@@ -22,22 +42,30 @@ SAFE_OUTPUT_FILES = [
     "baseline_products_updated.xlsx",
     "quality_price_report.xlsx",
     "run_summary.json",
+    "collection_contract.json",
+    "run_manifest.json",
+    "history_storage.json",
 ]
 
 DASHBOARD_JSON_FILES = [
     "frontend_price_overview.json",
     "pairing_matrix.json",
     "duration_price_comparison.json",
-    "price_trends.json",
+    "price_trends.json.gz",
     "price_change_tracking.json",
     "product_text_changes.json",
     "metric_definitions.json",
     "schedule_status.json",
     "meta.json",
     "current_price_snapshot.json",
+    "collection_contract.json",
+    "run_manifest.json",
+    "history_storage.json",
 ]
 
 PRICE_TRENDS_CHUNK_DIR = "price_trends_chunks"
+PRICE_TRENDS_FILE = "price_trends.json.gz"
+STATIC_HISTORY_CODEC = "gzip-json-v1"
 # Keep every generated dashboard JSON safely below GitHub's hard 100MB single-file limit.
 # This threshold is intentionally conservative because the final write_json uses
 # pretty printed JSON, which is larger than the compact size used for chunking.
@@ -52,6 +80,7 @@ BASE_PLATFORM = "UgPhone"
 LEGACY_BASE_PLATFORM = "UG" + "Phone"
 COMPETITOR_PLATFORMS = ["VSPhone", "Redfinger", "LDCloud"]
 FRONTEND_CORE_BUCKETS = [1, 3, 7, 15, 30, 60, 90, 180, 365]
+UGPHONE_RETIRED_DURATION_BUCKETS = {15}
 # Platform-specific duration mapping for decision-facing comparison buckets.
 # LDCloud has no true 7-day SKU in the monitored data, so its 8-day SKU is
 # compared in the 7-day bucket while retaining actual duration fields.
@@ -421,6 +450,51 @@ def write_json(path: Path, payload: Any) -> None:
     path.write_text(json.dumps(normalize_json_payload(payload), ensure_ascii=False, indent=2, default=json_safe), encoding="utf-8")
 
 
+def compact_json_bytes(payload: Any) -> bytes:
+    return json.dumps(
+        normalize_json_payload(payload),
+        ensure_ascii=False,
+        separators=(",", ":"),
+        default=json_safe,
+    ).encode("utf-8")
+
+
+def write_gzip_json(path: Path, payload: Any) -> dict[str, Any]:
+    """Write deterministic compact gzip JSON for large static Dashboard assets.
+
+    ``mtime=0`` keeps identical payloads byte-for-byte stable between runs, which
+    prevents meaningless GitHub Pages commits when historical content has not
+    changed.  The browser explicitly decompresses these assets, so hosting does
+    not depend on the server sending a Content-Encoding header.
+    """
+    path.parent.mkdir(parents=True, exist_ok=True)
+    raw = compact_json_bytes(payload)
+    compressed = gzip.compress(raw, compresslevel=9, mtime=0)
+    path.write_bytes(compressed)
+    return {
+        "file": path.as_posix(),
+        "codec": STATIC_HISTORY_CODEC,
+        "raw_bytes": len(raw),
+        "stored_bytes": len(compressed),
+        "saved_bytes": max(len(raw) - len(compressed), 0),
+        "compression_ratio": round((len(compressed) / len(raw)), 6) if raw else 1.0,
+    }
+
+
+def read_json_asset(path: Path) -> Any:
+    """Read either normal JSON or a v30 ``*.json.gz`` Dashboard asset."""
+    if str(path).lower().endswith(".gz"):
+        return json.loads(gzip.decompress(path.read_bytes()).decode("utf-8"))
+    return json.loads(path.read_text(encoding="utf-8"))
+
+
+def write_dashboard_payload(path: Path, payload: Any) -> dict[str, Any] | None:
+    if str(path).lower().endswith(".json.gz"):
+        return write_gzip_json(path, payload)
+    write_json(path, payload)
+    return None
+
+
 def estimate_compact_json_size(value: Any) -> int:
     """Approximate UTF-8 JSON size for chunk planning."""
     try:
@@ -489,7 +563,7 @@ def split_price_trends_detail_payloads(trends_payload: dict[str, Any]) -> tuple[
     detail_files: list[str] = []
     chunk_payloads: dict[str, Any] = {}
     for chunk_index, entries in enumerate(chunks, start=1):
-        filename = f"{PRICE_TRENDS_CHUNK_DIR}/price_trends_detail_{chunk_index:04d}.json"
+        filename = f"{PRICE_TRENDS_CHUNK_DIR}/price_trends_detail_{chunk_index:04d}.json.gz"
         detail_files.append(filename)
         for entry in entries:
             detail_index[str(entry.get("series_id") or "")] = filename
@@ -510,7 +584,7 @@ def split_price_trends_detail_payloads(trends_payload: dict[str, Any]) -> tuple[
     payload["split_detail_mode"] = bool(detail_files)
     payload["trend_detail_chunk_count"] = len(detail_files)
     payload["trend_detail_files"] = detail_files
-    payload["trend_detail_rule"] = "price_trends.json keeps merged historical series; machine-room and Android-version detail histories are stored in price_trends_chunks/*.json and loaded by the frontend only for the current view."
+    payload["trend_detail_rule"] = "price_trends.json.gz keeps merged historical series; machine-room and Android-version detail histories are stored in gzip-compressed price_trends_chunks/*.json.gz assets and loaded by the frontend only for the current view."
     return payload, chunk_payloads
 
 
@@ -552,6 +626,38 @@ def data_freshness(last_run_time: datetime | None, now: datetime, stale_after_ho
     return "fresh"
 
 
+def canonicalize_android_in_config_text(value: Any) -> Any:
+    """Normalize Android tokens embedded in human-readable configuration text."""
+    if value is None:
+        return value
+    text = str(value)
+    if not text.strip() or text.strip().lower() in {"nan", "none", "null"}:
+        return value
+
+    def repl(match: re.Match) -> str:
+        prefix = match.group(1)
+        version = canonical_android_version(match.group(2)) or match.group(2)
+        return f"{prefix}{version}"
+
+    return re.sub(r"((?:Android|A)\s*)([0-9]+(?:\.[0-9]+)?)", repl, text, flags=re.I)
+
+
+def canonicalize_android_fields(frame: pd.DataFrame) -> pd.DataFrame:
+    """Migrate current or historical dataframe Android fields to canonical form."""
+    if frame is None or frame.empty:
+        return frame
+    out = frame.copy()
+    for column in [
+        "android_version", "ug_android_version", "competitor_android_version",
+    ]:
+        if column in out.columns:
+            out[column] = out[column].map(canonical_android_version)
+    for column in ["ug_config", "competitor_config", "config"]:
+        if column in out.columns:
+            out[column] = out[column].map(canonicalize_android_in_config_text)
+    return out
+
+
 def read_excel_sheet(path: Path, sheet_name: str, columns: dict[str, str] | None = None) -> pd.DataFrame:
     if not path.exists():
         return pd.DataFrame()
@@ -562,7 +668,7 @@ def read_excel_sheet(path: Path, sheet_name: str, columns: dict[str, str] | None
     frame = frame.dropna(how="all")
     if columns:
         frame = frame.rename(columns={old: new for old, new in columns.items() if old in frame.columns})
-    return frame
+    return canonicalize_android_fields(frame)
 
 
 def parse_ug_config(ug_config: str) -> dict[str, Any]:
@@ -572,7 +678,7 @@ def parse_ug_config(ug_config: str) -> dict[str, Any]:
     ram = ""
     storage = ""
     if len(parts) > 1:
-        android = parts[1].replace("Android", "").strip()
+        android = canonical_android_version(parts[1]) or parts[1].replace("Android", "").strip()
     if len(parts) > 2:
         cpu = parts[2]
     if len(parts) > 3:
@@ -1480,9 +1586,28 @@ def build_duration_price_comparison(
     for (ug_config, duration_days), group in details.groupby(["ug_config", "duration_days"], dropna=False, sort=False):
         info = parse_duration_info(f"{duration_days} day" if not pd.isna(duration_days) else "")
         parsed = split_config(ug_config)
-        ug_price = reconstruct_price(group["ug_effective_price_30d"].dropna().iloc[0], duration_days) if "ug_effective_price_30d" in group and group["ug_effective_price_30d"].notna().any() else None
+        historical_ug_price = reconstruct_price(
+            group["ug_effective_price_30d"].dropna().iloc[0], duration_days
+        ) if "ug_effective_price_30d" in group and group["ug_effective_price_30d"].notna().any() else None
+        ug_price = historical_ug_price
         ug_current_observed = True
+        ug_non_subscription_observed = False
+        retired_duration = False
+        analysis_status = "quality_report_value"
+        analysis_note = ""
+        availability_status = AvailabilityStatus.AVAILABLE.value if historical_ug_price is not None else AvailabilityStatus.UNKNOWN.value
+        data_origin = DataOrigin.HISTORY_OBSERVED.value if historical_ug_price is not None else DataOrigin.SYNTHETIC.value
+        exclude_from_market_position = False
         if current_snapshot is not None:
+            try:
+                duration_number = float(duration_days)
+            except Exception:
+                duration_number = None
+            retired_duration = bool(
+                duration_number is not None
+                and abs(duration_number - round(duration_number)) < 1e-9
+                and int(round(duration_number)) in UGPHONE_RETIRED_DURATION_BUCKETS
+            )
             ug_current_observed = _snapshot_has_product_duration(
                 current_snapshot,
                 platform=BASE_PLATFORM,
@@ -1490,8 +1615,50 @@ def build_duration_price_comparison(
                 duration_days=duration_days,
                 purchase_mode=PURCHASE_MODE_SUBSCRIPTION,
             )
-            if not ug_current_observed:
+            ug_non_subscription_observed = _snapshot_has_product_duration(
+                current_snapshot,
+                platform=BASE_PLATFORM,
+                product_model=parsed["product_model"],
+                duration_days=duration_days,
+                purchase_mode=PURCHASE_MODE_NON_SUBSCRIPTION,
+            )
+            if retired_duration:
                 ug_price = None
+                analysis_status = "retired_duration"
+                availability_status = AvailabilityStatus.DISCONTINUED.value
+                data_origin = DataOrigin.SYNTHETIC.value
+                analysis_note = "UgPhone 15天套餐已长期下架；从当前价格位置统计中排除。"
+                exclude_from_market_position = True
+            elif ug_current_observed:
+                analysis_status = "current_observed"
+                availability_status = AvailabilityStatus.AVAILABLE.value
+                data_origin = DataOrigin.CURRENT_OBSERVED.value
+                analysis_note = "本次 products 表存在订阅价格。"
+            elif ug_non_subscription_observed:
+                # A real one-time row in the current run proves that this SKU
+                # exists but subscription mode is not currently available. Do
+                # not resurrect an old subscription price from baseline.
+                ug_price = None
+                analysis_status = "subscription_mode_unavailable"
+                availability_status = AvailabilityStatus.NOT_APPLICABLE.value
+                data_origin = DataOrigin.CURRENT_OBSERVED.value
+                analysis_note = "本次仅观察到非订阅价格；不沿用旧订阅价参与当前订阅价格位置统计。"
+                exclude_from_market_position = True
+            elif historical_ug_price is not None:
+                # Ordinary collection gaps retain the last real/baseline value,
+                # matching the Dashboard trend rule requested by the user. This
+                # is explicitly labelled carry-forward rather than current.
+                ug_price = historical_ug_price
+                analysis_status = "carry_forward_last_observed"
+                availability_status = AvailabilityStatus.MISSING_COLLECTION.value
+                data_origin = DataOrigin.CARRY_FORWARD.value
+                analysis_note = "本次未采到该订阅SKU；沿用上一真实采集价，直到下一真实采集点。"
+            else:
+                analysis_status = "ugphone_price_unavailable"
+                availability_status = AvailabilityStatus.MISSING_COLLECTION.value
+                data_origin = DataOrigin.SYNTHETIC.value
+                analysis_note = "当前与历史均无可用UgPhone订阅价格。"
+                exclude_from_market_position = True
         row = {
             "ug_config_id": public_config_id(ug_config),
             "ug_config": ug_config,
@@ -1503,7 +1670,18 @@ def build_duration_price_comparison(
             **info,
             "ugphone_price": json_safe(ug_price),
             "ugphone_current_observed": bool(ug_current_observed),
-            "ugphone_price_source": "current_products" if ug_current_observed and ug_price is not None else "missing_current_products",
+            "ugphone_non_subscription_observed": bool(ug_non_subscription_observed),
+            "ugphone_price_source": (
+                "current_products" if ug_current_observed and ug_price is not None
+                else "carry_forward_last_observed" if analysis_status == "carry_forward_last_observed" and ug_price is not None
+                else analysis_status
+            ),
+            "analysis_status": analysis_status,
+            "availability_status": availability_status,
+            "data_origin": data_origin,
+            "analysis_note": analysis_note,
+            "exclude_from_market_position": bool(exclude_from_market_position),
+            "market_position_status": "excluded" if exclude_from_market_position else "pending",
             "has_price_change": False,
             "promotion_text_changed": False,
             "competitors": {},
@@ -1594,9 +1772,17 @@ def build_duration_price_comparison(
                 "comparison_duration_note": json_safe(candidate_duration_info.get("comparison_duration_note")),
             }
         row["competitor_median_price"] = json_safe(median(core_prices))
-        if ug_price is not None and row["competitor_median_price"]:
-            row["ugphone_relative_index"] = json_safe(ug_price / row["competitor_median_price"] * 100)
-            row["market_position_label"] = frontend_position(row["ugphone_relative_index"])
+        if not row.get("exclude_from_market_position"):
+            if ug_price is not None and row["competitor_median_price"]:
+                row["ugphone_relative_index"] = json_safe(ug_price / row["competitor_median_price"] * 100)
+                row["market_position_label"] = frontend_position(row["ugphone_relative_index"])
+                row["market_position_status"] = "comparable"
+            elif ug_price is not None:
+                row["market_position_status"] = "competitor_insufficient"
+                row["analysis_note"] = (row.get("analysis_note") + " 核心竞品价格不足，无法计算相对指数。").strip()
+            else:
+                row["market_position_status"] = "excluded"
+                row["exclude_from_market_position"] = True
         if info["is_core_duration_bucket"]:
             buckets[str(info["duration_bucket"])].append(row)
         else:
@@ -1606,16 +1792,30 @@ def build_duration_price_comparison(
 
 def build_frontend_price_overview(duration_comparison: dict[str, Any], meta: dict[str, Any]) -> dict[str, Any]:
     rows = [row for bucket in duration_comparison["buckets"].values() for row in bucket]
-    counts = Counter(row.get("market_position_label") or "unknown" for row in rows)
+    eligible_rows = [row for row in rows if not bool(row.get("exclude_from_market_position"))]
+    counts = Counter(row.get("market_position_label") or "unknown" for row in eligible_rows)
+    status_counts = Counter(row.get("analysis_status") or "unknown" for row in rows)
+    market_status_counts = Counter(row.get("market_position_status") or "unknown" for row in rows)
     focus = sorted(
-        [row for row in rows if row.get("market_position_label") in {"high", "slightly_high"}],
+        [row for row in eligible_rows if row.get("market_position_label") in {"high", "slightly_high"}],
         key=lambda item: (POSITION_RANK.get(item.get("market_position_label"), 4), -(item.get("ugphone_relative_index") or 0)),
     )[:12]
+    available_buckets = [
+        bucket for bucket in FRONTEND_CORE_BUCKETS
+        if bucket not in UGPHONE_RETIRED_DURATION_BUCKETS
+    ]
     return {
         "updated_at": meta.get("last_run_at_utc") or meta.get("generated_at_utc"),
-        "baseline_config_count": len({row.get("ug_config_id") for row in rows}),
-        "core_duration_buckets": FRONTEND_CORE_BUCKETS,
-        "rows_compared": len(rows),
+        "baseline_config_count": len({row.get("ug_config_id") for row in eligible_rows}),
+        "core_duration_buckets": available_buckets,
+        "rows_compared": len(eligible_rows),
+        "rows_total_before_exclusions": len(rows),
+        "excluded_from_market_position_count": len(rows) - len(eligible_rows),
+        "analysis_status_counts": dict(status_counts),
+        "market_position_status_counts": dict(market_status_counts),
+        # "unknown" now means genuine lack of core competitor evidence among
+        # otherwise usable UgPhone prices. Retired/mode-unavailable/missing-Ug
+        # rows are audited separately and no longer inflate 数据不足.
         "market_position_counts": dict(counts),
         "above_market_count": counts.get("slightly_high", 0) + counts.get("high", 0),
         "below_market_count": counts.get("below_market", 0),
@@ -2321,9 +2521,7 @@ def android_version_from_row(row: pd.Series | dict[str, Any]) -> str:
         value = row.get("android_version")
     except Exception:
         value = None
-    text = normalize_display_text(value)
-    match = re.search(r"[0-9]+(?:\.[0-9]+)?", text)
-    return match.group(0)[:-2] if match and match.group(0).endswith(".0") else (match.group(0) if match else text)
+    return canonical_android_version(value) or normalize_display_text(value)
 
 
 def is_core_price_variant(promotion_text: Any = "", raw_text: Any = "", duration_text: Any = "") -> bool:
@@ -2412,7 +2610,7 @@ def normalize_config_signature(value: Any) -> str:
     storage = ""
     android_match = re.search(r"(?:android|a)\s*([0-9]+(?:\.[0-9]+)?)", lower)
     if android_match:
-        android = android_match.group(1)[:-2] if android_match.group(1).endswith(".0") else android_match.group(1)
+        android = canonical_android_version(android_match.group(1)) or android_match.group(1)
     cpu_match = re.search(r"([0-9]+(?:\.[0-9]+)?)\s*(?:cores?|c\b)", lower)
     if cpu_match:
         cpu = cpu_match.group(1)[:-2] if cpu_match.group(1).endswith(".0") else cpu_match.group(1)
@@ -2427,8 +2625,7 @@ def normalize_config_signature(value: Any) -> str:
 
 
 def config_signature_from_product_row(row: pd.Series) -> str:
-    android = normalize_token(row.get("android_version"))
-    android = android[:-2] if android.endswith(".0") else android
+    android = canonical_android_version(row.get("android_version")) or normalize_token(row.get("android_version"))
     cpu = normalize_token(row.get("cpu"))
     ram = normalize_token(row.get("ram"))
     storage = normalize_token(row.get("storage"))
@@ -2689,6 +2886,8 @@ def add_history_point(
         "date": date,
         "price": json_safe(price_value),
         "price_source": source,
+        "data_origin": DataOrigin.HISTORY_OBSERVED.value,
+        "availability_status": AvailabilityStatus.AVAILABLE.value,
         "platform": platform_name,
         "product_model": normalize_display_text(product_model),
         "config_signature": config_signature,
@@ -2776,6 +2975,8 @@ def add_regional_history_point(
         "date": date,
         "price": json_safe(price_value),
         "price_source": source,
+        "data_origin": DataOrigin.HISTORY_OBSERVED.value,
+        "availability_status": AvailabilityStatus.AVAILABLE.value,
         "platform": platform_name,
         "product_model": normalize_display_text(product_model),
         "config_signature": config_signature,
@@ -2821,7 +3022,7 @@ def add_regional_history_point(
     )
 
 
-def read_products_history_frame(run_dir: Path) -> pd.DataFrame:
+def read_products_history_frame(run_dir: Path, role: str | DatasetRole = DatasetRole.HISTORICAL) -> pd.DataFrame:
     """Read a historical products table quickly.
 
     Most historical output directories contain products.csv; some only have
@@ -2831,7 +3032,7 @@ def read_products_history_frame(run_dir: Path) -> pd.DataFrame:
     csv_path = run_dir / "products.csv"
     if csv_path.exists():
         try:
-            return pd.read_csv(csv_path, dtype=object)
+            return migrate_products_frame(canonicalize_android_fields(pd.read_csv(csv_path, dtype=object)), role=role)
         except Exception:
             pass
     xlsx_path = run_dir / "products.xlsx"
@@ -2841,13 +3042,13 @@ def read_products_history_frame(run_dir: Path) -> pd.DataFrame:
             # so first try the first sheet and fall back to all sheets only if needed.
             frame = pd.read_excel(xlsx_path, dtype=object)
             if not frame.empty:
-                return frame
+                return migrate_products_frame(canonicalize_android_fields(frame), role=role)
         except Exception:
             try:
                 sheets = pd.read_excel(xlsx_path, sheet_name=None, dtype=object)
                 frames = [df for df in sheets.values() if isinstance(df, pd.DataFrame) and not df.empty]
                 if frames:
-                    return pd.concat(frames, ignore_index=True)
+                    return migrate_products_frame(canonicalize_android_fields(pd.concat(frames, ignore_index=True)), role=role)
             except Exception:
                 pass
     return pd.DataFrame()
@@ -2913,9 +3114,12 @@ def build_current_price_snapshot(output_dir: Path) -> dict[str, Any]:
     called *current* must instead be anchored to this run's products table.
     No cookies, tokens, account ids, raw HTML or API bodies are exported.
     """
-    frame = read_products_history_frame(output_dir)
+    frame = read_products_history_frame(output_dir, role=DatasetRole.CURRENT)
     if frame.empty:
         return {
+            "schema_version": SCHEMA_VERSION,
+            "skill_release": SKILL_RELEASE,
+            "dataset_role": DatasetRole.CURRENT.value,
             "generated_at_utc": datetime.now(timezone.utc).isoformat(timespec="seconds"),
             "source_output_dir": str(output_dir),
             "collection_date": output_run_date(output_dir),
@@ -2973,9 +3177,14 @@ def build_current_price_snapshot(output_dir: Path) -> dict[str, Any]:
         )[0]
         representative = selected["rows"][0]
         entry = {
+            "schema_version": SCHEMA_VERSION,
+            "dataset_role": DatasetRole.CURRENT.value,
+            "data_origin": DataOrigin.CURRENT_OBSERVED.value,
+            "availability_status": AvailabilityStatus.AVAILABLE.value,
+            "canonical_product_key": canonical_product_key(representative),
             "platform": key[0],
             "product_model": normalize_display_text(representative.get("product_model")),
-            "android_version": json_safe(representative.get("android_version")),
+            "android_version": json_safe(canonical_android_version(representative.get("android_version"))),
             "cpu": json_safe(representative.get("cpu")),
             "ram": json_safe(representative.get("ram")),
             "storage": json_safe(representative.get("storage")),
@@ -3007,6 +3216,9 @@ def build_current_price_snapshot(output_dir: Path) -> dict[str, Any]:
         str(row.get("purchase_mode") or ""),
     ))
     return {
+        "schema_version": SCHEMA_VERSION,
+        "skill_release": SKILL_RELEASE,
+        "dataset_role": DatasetRole.CURRENT.value,
         "generated_at_utc": datetime.now(timezone.utc).isoformat(timespec="seconds"),
         "source_output_dir": str(output_dir),
         "source_file": source_file.name,
@@ -3616,10 +3828,11 @@ def collect_history_from_price_trends(
     loose_history: dict[tuple[str, str, str], dict[str, dict[str, Any]]],
 ) -> None:
     trends_path = run_dir / "dashboard_data" / "price_trends.json"
-    if not trends_path.exists():
+    compressed_trends_path = run_dir / "dashboard_data" / PRICE_TRENDS_FILE
+    if not trends_path.exists() and not compressed_trends_path.exists():
         return
     try:
-        payload = json.loads(trends_path.read_text(encoding="utf-8"))
+        payload = read_json_asset(trends_path if trends_path.exists() else compressed_trends_path)
     except Exception:
         return
     series_rows = payload.get("series") if isinstance(payload, dict) else payload
@@ -3718,7 +3931,61 @@ def collect_history_from_quality_report(
         )
 
 
-def collect_historical_trend_points(current_output_dir: Path) -> tuple[
+def _empty_daily_history_payload() -> dict[str, Any]:
+    return {
+        "history": {},
+        "loose_history": {},
+        "other_paid_prices": [],
+        "regional_history": {},
+        "regional_loose_history": {},
+        "android_history": {},
+        "android_loose_history": {},
+        "android_regional_history": {},
+        "android_regional_loose_history": {},
+        "collection_coverage": _new_history_collection_coverage(),
+    }
+
+
+def _collect_daily_history_payload(run_dir: Path, date: str) -> dict[str, Any]:
+    payload = _empty_daily_history_payload()
+    added = collect_history_from_products(
+        run_dir,
+        date,
+        payload["history"],
+        payload["loose_history"],
+        payload["other_paid_prices"],
+        payload["regional_history"],
+        payload["regional_loose_history"],
+        payload["android_history"],
+        payload["android_loose_history"],
+        payload["android_regional_history"],
+        payload["android_regional_loose_history"],
+        payload["collection_coverage"],
+    )
+    if added == 0:
+        collect_history_from_price_trends(run_dir, payload["history"], payload["loose_history"])
+        collect_history_from_quality_report(run_dir, date, payload["history"], payload["loose_history"])
+    return payload
+
+
+def _deep_merge_history(target: dict[Any, Any], source: dict[Any, Any]) -> None:
+    for key, value in source.items():
+        if isinstance(value, dict):
+            existing = target.setdefault(key, {})
+            if isinstance(existing, dict):
+                _deep_merge_history(existing, value)
+            else:
+                target[key] = value
+        elif isinstance(value, set):
+            target.setdefault(key, set()).update(value)
+        else:
+            target[key] = value
+
+
+def collect_historical_trend_points(
+    current_output_dir: Path,
+    cache_mode: str = "incremental",
+) -> tuple[
     dict[tuple[str, str, str, str], dict[str, dict[str, Any]]],
     dict[tuple[str, str, str], dict[str, dict[str, Any]]],
     list[dict[str, Any]],
@@ -3729,76 +3996,80 @@ def collect_historical_trend_points(current_output_dir: Path) -> tuple[
     dict[tuple[str, str, str, str], dict[str, dict[str, dict[str, Any]]]],
     dict[tuple[str, str, str], dict[str, dict[str, dict[str, Any]]]],
     dict[str, dict[Any, set[str]]],
+    dict[str, Any],
 ]:
-    """Collect daily historical prices from prior output/cloud_phone_monitor_* runs.
+    """Collect historical prices with a safe per-day incremental cache.
 
-    Important behavior:
-    - History is reconstructed primarily from products.csv/products.xlsx, because
-      old runs usually do not have dashboard_data/price_trends.json.
-    - Only the latest successful run for each calendar day is used. This prevents
-      dozens of runs on the same day from overwriting each other unpredictably and
-      makes the trend chart show one point per day.
-    - Historical quality_price_report.xlsx is intentionally not scanned for every
-      run here; reading many Excel reports is slow and was a major reason the
-      trend export appeared to do nothing. The current run's quality report is
-      still used to define paired product lines; history points come from the
-      daily products table.
+    First v29 rebuild populates ``output/.history_cache/schema_9``. Subsequent
+    rebuilds reparse only a new/changed collection day; ``--full`` ignores the
+    cache and recreates every day. The cache is runtime-only and is never part
+    of Dashboard/GitHub data.
     """
-    history: dict[tuple[str, str, str, str], dict[str, dict[str, Any]]] = {}
-    loose_history: dict[tuple[str, str, str], dict[str, dict[str, Any]]] = {}
-    other_paid_prices: list[dict[str, Any]] = []
-    regional_history: dict[tuple[str, str, str, str], dict[str, dict[str, dict[str, Any]]]] = {}
-    regional_loose_history: dict[tuple[str, str, str], dict[str, dict[str, dict[str, Any]]]] = {}
-    android_history: dict[tuple[str, str, str, str], dict[str, dict[str, Any]]] = {}
-    android_loose_history: dict[tuple[str, str, str], dict[str, dict[str, Any]]] = {}
-    android_regional_history: dict[tuple[str, str, str, str], dict[str, dict[str, dict[str, Any]]]] = {}
-    android_regional_loose_history: dict[tuple[str, str, str], dict[str, dict[str, dict[str, Any]]]] = {}
-    collection_coverage = _new_history_collection_coverage()
+    merged = _empty_daily_history_payload()
 
-    # Keep only the latest usable run for each day.
     runs_by_date: dict[str, Path] = {}
     for run_dir in iter_history_output_dirs(current_output_dir):
         date = output_run_date(run_dir)
         if not date:
             continue
-        if not ((run_dir / "products.csv").exists() or (run_dir / "products.xlsx").exists() or (run_dir / "dashboard_data" / "price_trends.json").exists()):
+        if not ((run_dir / "products.csv").exists() or (run_dir / "products.xlsx").exists() or (run_dir / "dashboard_data" / "price_trends.json").exists() or (run_dir / "dashboard_data" / PRICE_TRENDS_FILE).exists()):
             continue
         runs_by_date[date] = run_dir
 
+    mode = "full" if str(cache_mode).lower() == "full" else "incremental"
+    cache_root = history_cache_root(current_output_dir)
+    stats = {
+        "mode": mode,
+        "cache_root": str(cache_root),
+        "total_days": len(runs_by_date),
+        "cache_hits": 0,
+        "cache_misses": 0,
+        "rebuilt_days": [],
+    }
+
     for date, run_dir in sorted(runs_by_date.items()):
-        # Prefer products.csv/products.xlsx because they allow us to classify price
-        # variants and exclude new-user / flash / multi-device package prices from
-        # core monitoring.  Old price_trends.json may already be contaminated by
-        # those variants, so only use it when the run has no readable products table.
-        added = collect_history_from_products(
-            run_dir,
-            date,
-            history,
-            loose_history,
-            other_paid_prices,
-            regional_history,
-            regional_loose_history,
-            android_history,
-            android_loose_history,
-            android_regional_history,
-            android_regional_loose_history,
-            collection_coverage,
-        )
-        if added == 0:
-            collect_history_from_price_trends(run_dir, history, loose_history)
-            collect_history_from_quality_report(run_dir, date, history, loose_history)
-    other_paid_prices.sort(key=lambda row: (str(row.get("date") or ""), str(row.get("platform") or ""), str(row.get("product_model") or ""), str(row.get("duration_bucket") or ""), variant_sort_rank(row.get("price_variant"))))
+        fingerprint = source_fingerprint(run_dir)
+        cache_path = cache_root / f"{date}.pkl"
+        daily = None if mode == "full" else load_daily_cache(cache_path, fingerprint)
+        if daily is None:
+            stats["cache_misses"] += 1
+            stats["rebuilt_days"].append(date)
+            daily = _collect_daily_history_payload(run_dir, date)
+            try:
+                save_daily_cache(cache_path, fingerprint, daily)
+            except Exception:
+                # Cache failure must never block Dashboard rebuild.
+                pass
+        else:
+            stats["cache_hits"] += 1
+
+        for section in [
+            "history", "loose_history", "regional_history", "regional_loose_history",
+            "android_history", "android_loose_history", "android_regional_history",
+            "android_regional_loose_history", "collection_coverage",
+        ]:
+            _deep_merge_history(merged[section], daily.get(section) or {})
+        merged["other_paid_prices"].extend(daily.get("other_paid_prices") or [])
+
+    other_paid_prices = merged["other_paid_prices"]
+    other_paid_prices.sort(key=lambda row: (
+        str(row.get("date") or ""), str(row.get("platform") or ""),
+        str(row.get("product_model") or ""), str(row.get("duration_bucket") or ""),
+        variant_sort_rank(row.get("price_variant")),
+    ))
+    stats["rebuilt_day_count"] = len(stats["rebuilt_days"])
     return (
-        history,
-        loose_history,
+        merged["history"],
+        merged["loose_history"],
         latest_unique_other_paid_prices(other_paid_prices),
-        regional_history,
-        regional_loose_history,
-        android_history,
-        android_loose_history,
-        android_regional_history,
-        android_regional_loose_history,
-        collection_coverage,
+        merged["regional_history"],
+        merged["regional_loose_history"],
+        merged["android_history"],
+        merged["android_loose_history"],
+        merged["android_regional_history"],
+        merged["android_regional_loose_history"],
+        merged["collection_coverage"],
+        stats,
     )
 
 def merge_series_points(
@@ -3815,7 +4086,12 @@ def merge_series_points(
         date = str(point.get("date") or "")
         if is_iso_date_label(date):
             if date not in by_date:
-                by_date[date] = {"date": date, "price": json_safe(point.get("price")), "price_source": point.get("price_source") or "current"}
+                by_date[date] = {
+                    **point,
+                    "date": date,
+                    "price": json_safe(point.get("price")),
+                    "price_source": point.get("price_source") or "current",
+                }
         elif date == "previous":
             previous_points.append(point)
     real_points = [by_date[key] for key in sorted(by_date)]
@@ -4201,7 +4477,7 @@ def extract_android_versions_from_config(value: Any) -> list[str]:
     versions = []
     for match in re.finditer(r"(?:android|a)\s*([0-9]+(?:\.[0-9]+)?)", text, flags=re.I):
         raw = match.group(1)
-        label = raw[:-2] if raw.endswith(".0") else raw
+        label = canonical_android_version(raw) or raw
         versions.append(label)
     return sorted(set(versions), key=android_version_sort_key)
 
@@ -4402,7 +4678,7 @@ def android_version_from_config_signature_value(value: Any) -> str | None:
     parts = text.split("|")
     if not parts:
         return None
-    return normalize_display_text(parts[0]) or None
+    return canonical_android_version(parts[0]) or normalize_display_text(parts[0]) or None
 
 def build_price_trends(
     price_changes: list[dict[str, Any]],
@@ -4424,7 +4700,11 @@ def build_price_trends(
         android_regional_history,
         android_regional_loose_history,
         collection_coverage,
-    ) = collect_historical_trend_points(output_dir)
+        history_cache_stats,
+    ) = collect_historical_trend_points(
+        output_dir,
+        cache_mode=str(meta.get("history_cache_mode") or "incremental"),
+    )
     change_lookup: dict[tuple[str, str, str], dict[str, Any]] = {}
     for row in price_changes:
         key = (
@@ -4554,27 +4834,58 @@ def build_price_trends(
         change = change_lookup.get((platform, product_key, bucket_key), {})
         previous = change.get("previous_price")
         baseline = change.get("baseline_price")
-        # The caller's current_price comes from the current products snapshot
-        # (via duration comparison).  Do not resurrect a missing current SKU from
-        # price_change_tracking, because that table may still contain baseline
-        # fallback values for comparison diagnostics.
+        hist_points = history.get((platform, product_key, signature_no_android, bucket_key))
+        if not hist_points:
+            hist_points = loose_history.get((platform, product_key, bucket_key), {})
+
+        # The caller's current_price comes from current products or from the
+        # explicit carry-forward policy in duration comparison. When carrying
+        # forward, prefer the most recent *raw historical products* point over
+        # the rolling baseline value. This prevents an old baseline fallback
+        # (for example a stale GVIP 7.99) from becoming a fake current point when
+        # the last real collected majority price was different.
         current = current_price
         source = price_source
-        # Baseline is comparison context only.  Never manufacture a current-day
-        # chart point from baseline when the current products table did not
-        # observe the SKU.  Historical products.csv points remain authoritative.
+        carried_from_date = None
+        if source == "carry_forward_last_observed" and hist_points:
+            candidates = [
+                point for date, point in sorted(hist_points.items())
+                if is_iso_date_label(date)
+                and str(date) < str(current_date)
+                and parse_float_value((point or {}).get("price")) is not None
+            ]
+            if candidates:
+                latest = candidates[-1]
+                current = parse_float_value(latest.get("price"))
+                carried_from_date = latest.get("source_collection_date") or latest.get("date")
+                source = "carry_forward"
         if current is None:
             source = "missing_current_products"
         if previous is None:
             previous = baseline if baseline is not None else current
         line_name = f"{platform} {product_model or '-'} {duration_display or bucket}"
+        current_point = {
+            "date": current_date,
+            "price": json_safe(current),
+            "price_source": source,
+            "data_origin": (
+                DataOrigin.CURRENT_OBSERVED.value if source == "current"
+                else DataOrigin.CARRY_FORWARD.value if source in {"carry_forward", "carry_forward_last_observed"}
+                else DataOrigin.SYNTHETIC.value
+            ),
+            "availability_status": (
+                AvailabilityStatus.AVAILABLE.value if source == "current" and current is not None
+                else AvailabilityStatus.MISSING_COLLECTION.value if source in {"carry_forward", "carry_forward_last_observed", "missing_current_products"}
+                else AvailabilityStatus.UNKNOWN.value
+            ),
+        }
+        if carried_from_date:
+            current_point["source_collection_date"] = carried_from_date
+            current_point["carried_from_date"] = carried_from_date
         base_points = [
             {"date": previous_date, "price": json_safe(previous), "price_source": "previous"},
-            {"date": current_date, "price": json_safe(current), "price_source": source},
+            current_point,
         ]
-        hist_points = history.get((platform, product_key, signature_no_android, bucket_key))
-        if not hist_points:
-            hist_points = loose_history.get((platform, product_key, bucket_key), {})
         points = merge_series_points(base_points, hist_points or {})
         regional_hist_points = regional_history.get((platform, product_key, signature_no_android, bucket_key))
         if not regional_hist_points:
@@ -4641,6 +4952,7 @@ def build_price_trends(
             duration_display=row.get("duration_display"),
             current_price=row.get("ugphone_price"),
             comparability_level="base",
+            price_source=row.get("ugphone_price_source") or "current",
             config_similarity_score=100,
             ug_product_model_value=row.get("ug_product_model"),
         )
@@ -4673,6 +4985,8 @@ def build_price_trends(
     # matching paired row. This prevents old daily product data from being ignored
     # completely and makes the trend chart prove that history was actually read.
     for (platform, product_key, bucket_key), hist_points in sorted(loose_history.items()):
+        if platform == BASE_PLATFORM and str(bucket_key) in {str(v) for v in UGPHONE_RETIRED_DURATION_BUCKETS}:
+            continue
         if (platform, product_key, bucket_key) in existing_line_keys:
             continue
         if not hist_points:
@@ -4746,6 +5060,8 @@ def build_price_trends(
     # inherit every applicable UgPhone pairing group from their subscription line.
     non_subscription_seen: set[tuple[str, str, str, str, str]] = set()
     for (platform, product_key, signature_no_android, bucket_key), hist_points in sorted(history.items()):
+        if platform == BASE_PLATFORM and str(bucket_key) in {str(v) for v in UGPHONE_RETIRED_DURATION_BUCKETS}:
+            continue
         if platform not in PURCHASE_MODE_PLATFORMS:
             continue
         if purchase_mode_from_signature(platform, signature_no_android) != PURCHASE_MODE_NON_SUBSCRIPTION:
@@ -4931,6 +5247,7 @@ def build_price_trends(
         "region_display_rule": "图二默认使用合并所有机房的多数机房价格；选择具体机房后，前端改用 regional_points 中该机房的历史实付价。",
         "carry_forward_point_count": carry_forward_point_count,
         "history_run_dir_count": len(iter_history_output_dirs(output_dir)),
+        "history_cache": history_cache_stats,
         "duration_comparison_rule": "LDCloud has no true 7-day SKU in the monitored data; its 8-day SKU is mapped to the 7-day bucket for comparison while preserving actual 8-day display/audit fields.",
         "core_price_rule": "core trend uses the majority-region current purchasable single-device paid price for the same platform/product/duration/non-Android config; if region counts tie, the lower price wins; new-user, unavailable, multi-device, trial and flash prices do not drive the core trend",
         "regional_price_rule": "when the same product differs by machine room/region, core trend selects the price covering the most purchasable machine rooms; lower or higher minority-region prices are exported as other_paid_prices",
@@ -5002,7 +5319,7 @@ def build_admin_diagnostics(run_summary: dict[str, Any], platform_rows: list[dic
     }
 
 
-def export_dashboard_data(output_dir: Path, mirror_dirs: list[Path] | None = None) -> Path:
+def export_dashboard_data(output_dir: Path, mirror_dirs: list[Path] | None = None, history_cache_mode: str = "incremental") -> Path:
     output_dir = Path(output_dir)
     dashboard_dir = output_dir / "dashboard_data"
     run_summary = read_json(output_dir / "run_summary.json")
@@ -5012,6 +5329,22 @@ def export_dashboard_data(output_dir: Path, mirror_dirs: list[Path] | None = Non
     relative = read_excel_sheet(quality_path, "UG相对竞品指数", RELATIVE_COLS)
     pairings = read_excel_sheet(quality_path, "配置配对建议", PAIRING_COLS)
     rationality = read_excel_sheet(quality_path, "变价合理性判断", RATIONALITY_COLS)
+
+    # Migration guard for historical quality workbooks: UgPhone's 15-day SKU
+    # has been retired for a long time. Older baseline-overlay workbooks may
+    # still recreate it every day. Remove only UgPhone-anchored 15-day rows
+    # here; competitor 15-day products remain available in raw trend history.
+    if not details.empty and "duration_days" in details.columns:
+        details = details[pd.to_numeric(details["duration_days"], errors="coerce").ne(15)].copy()
+    if not relative.empty and "duration_days" in relative.columns:
+        relative = relative[pd.to_numeric(relative["duration_days"], errors="coerce").ne(15)].copy()
+    if not rationality.empty and {"platform", "duration_days"}.issubset(rationality.columns):
+        rat_platform = rationality["platform"].map(normalize_platform_name)
+        rat_days = pd.to_numeric(rationality["duration_days"], errors="coerce")
+        rationality = rationality[~((rat_platform == BASE_PLATFORM) & rat_days.eq(15))].copy()
+    if not pairings.empty and "ug_duration" in pairings.columns:
+        pairing_days = pairings["ug_duration"].map(lambda value: parse_duration_info(value).get("duration_days"))
+        pairings = pairings[pd.to_numeric(pairing_days, errors="coerce").ne(15)].copy()
 
     # A failed platform collection can yield an empty or header-only quality sheet.
     # Keep export deterministic: represent absent columns as nulls, then let the
@@ -5029,6 +5362,22 @@ def export_dashboard_data(output_dir: Path, mirror_dirs: list[Path] | None = Non
         if column not in rationality.columns:
             rationality[column] = pd.NA
 
+    # Migration guard for quality workbooks produced before Android-version
+    # canonicalization.  Those workbooks can contain both Android 10 and 10.0
+    # as separate UG configs.  After canonicalizing labels they represent the
+    # same row, so retain the later workbook row (the current-run variant in the
+    # affected reports) instead of double-counting the configuration.
+    if not relative.empty and {"ug_config", "duration_days"}.issubset(relative.columns):
+        relative = relative.drop_duplicates(subset=["ug_config", "duration_days"], keep="last").reset_index(drop=True)
+    rationality_identity = [
+        column for column in [
+            "platform", "product_model", "device_model", "android_version",
+            "cpu", "ram", "storage", "duration_days",
+        ] if column in rationality.columns
+    ]
+    if not rationality.empty and rationality_identity:
+        rationality = rationality.drop_duplicates(subset=rationality_identity, keep="last").reset_index(drop=True)
+
     details, pairings = enrich_ids(details, pairings)
 
     current_price_snapshot = build_current_price_snapshot(output_dir)
@@ -5044,6 +5393,14 @@ def export_dashboard_data(output_dir: Path, mirror_dirs: list[Path] | None = Non
     daily_changes = build_daily_changes(output_dir)
     schedule_status = build_schedule_status(run_summary)
     meta = {
+        "schema_version": SCHEMA_VERSION,
+        "skill_release": SKILL_RELEASE,
+        "dataset_roles": {
+            "current": "current_run_products_table",
+            "historical": "historical_real_observations_plus_explicit_carry_forward",
+            "baseline": "reference_only_never_current",
+        },
+        "history_cache_mode": "full" if str(history_cache_mode).lower() == "full" else "incremental",
         "is_mock_data": False,
         "source": "dashboard_export",
         "source_output_dir": str(output_dir),
@@ -5058,6 +5415,12 @@ def export_dashboard_data(output_dir: Path, mirror_dirs: list[Path] | None = Non
             **current_detail_overlay,
             "rationality_rows": current_rationality_overlay_rows,
         },
+        "static_history_storage": {
+            "codec": STATIC_HISTORY_CODEC,
+            "price_trends_file": PRICE_TRENDS_FILE,
+            "detail_chunk_dir": PRICE_TRENDS_CHUNK_DIR,
+            "legacy_uncompressed_supported": True,
+        },
     }
     pairing_records = build_pairing_evidence_records(pairings)
     price_changes = build_price_change_tracking(rationality)
@@ -5069,12 +5432,38 @@ def export_dashboard_data(output_dir: Path, mirror_dirs: list[Path] | None = Non
     price_trends_payload, price_trends_chunk_payloads = split_price_trends_detail_payloads(
         build_price_trends(price_changes, duration_comparison, meta)
     )
+    collection_contract_path = output_dir / "collection_contract.json"
+    run_manifest_path = output_dir / "run_manifest.json"
+    collection_contract = read_json(collection_contract_path)
+    if not collection_contract:
+        current_contract_frame = read_products_history_frame(output_dir, role=DatasetRole.CURRENT)
+        baseline_reference_frame = pd.DataFrame()
+        baseline_reference_path = output_dir / "baseline_products_updated.xlsx"
+        if baseline_reference_path.exists():
+            try:
+                baseline_reference_frame = load_products_table(baseline_reference_path)
+            except Exception:
+                baseline_reference_frame = pd.DataFrame()
+        collection_contract = build_collection_contract(output_dir, current_contract_frame, baseline_reference_frame)
+        try:
+            write_json(collection_contract_path, collection_contract)
+        except Exception:
+            pass
+    run_manifest = read_json(run_manifest_path)
+    if not run_manifest:
+        run_manifest = build_run_manifest(output_dir, run_summary, collection_contract)
+        try:
+            write_json(run_manifest_path, run_manifest)
+        except Exception:
+            pass
 
     payloads = {
+        "collection_contract.json": collection_contract or {"schema_version": SCHEMA_VERSION, "status": "not_available"},
+        "run_manifest.json": run_manifest or {"skill_release": SKILL_RELEASE, "schema_version": SCHEMA_VERSION},
         "frontend_price_overview.json": build_frontend_price_overview(duration_comparison, meta),
         "pairing_matrix.json": build_pairing_matrix(pairing_records),
         "duration_price_comparison.json": duration_comparison,
-        "price_trends.json": price_trends_payload,
+        PRICE_TRENDS_FILE: price_trends_payload,
         **price_trends_chunk_payloads,
         "price_change_tracking.json": price_changes,
         "product_text_changes.json": build_product_text_changes(price_changes),
@@ -5122,8 +5511,31 @@ def export_dashboard_data(output_dir: Path, mirror_dirs: list[Path] | None = Non
     if dashboard_dir.exists():
         shutil.rmtree(dashboard_dir)
     dashboard_dir.mkdir(parents=True, exist_ok=True)
+    gzip_stats: list[dict[str, Any]] = []
     for filename, payload in payloads.items():
-        write_json(dashboard_dir / filename, payload)
+        stat = write_dashboard_payload(dashboard_dir / filename, payload)
+        if stat:
+            stat["file"] = filename
+            gzip_stats.append(stat)
+
+    raw_history_bytes = sum(int(item.get("raw_bytes") or 0) for item in gzip_stats)
+    stored_history_bytes = sum(int(item.get("stored_bytes") or 0) for item in gzip_stats)
+    history_storage = {
+        "schema_version": SCHEMA_VERSION,
+        "skill_release": SKILL_RELEASE,
+        "codec": STATIC_HISTORY_CODEC,
+        "price_trends_file": PRICE_TRENDS_FILE,
+        "detail_chunk_dir": PRICE_TRENDS_CHUNK_DIR,
+        "compressed_asset_count": len(gzip_stats),
+        "raw_history_bytes": raw_history_bytes,
+        "stored_history_bytes": stored_history_bytes,
+        "saved_bytes": max(raw_history_bytes - stored_history_bytes, 0),
+        "space_saving_pct": round((1 - stored_history_bytes / raw_history_bytes) * 100, 2) if raw_history_bytes else 0.0,
+        "assets": gzip_stats,
+        "browser_loading_rule": "Fetch .json.gz as bytes; if gzip magic is present, decompress with DecompressionStream('gzip'); if hosting already decoded it, parse returned UTF-8 JSON directly.",
+        "legacy_fallback": "Frontend also accepts v29 price_trends.json and .json detail chunks during transition.",
+    }
+    write_json(dashboard_dir / "history_storage.json", history_storage)
 
     for mirror in mirror_dirs or []:
         mirror = Path(mirror)

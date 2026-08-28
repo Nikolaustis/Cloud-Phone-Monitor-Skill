@@ -10,6 +10,8 @@ from typing import Iterable
 
 import pandas as pd
 
+from cloud_phone_monitor.utils.normalize import canonical_android_version
+
 
 BASE_PLATFORM = "UgPhone"
 COMPETITOR_PLATFORMS = ["VSPhone", "Redfinger", "LDCloud"]
@@ -510,6 +512,10 @@ def add_standardized_price_fields(df: pd.DataFrame, effective_period_days: int =
     ]:
         if col not in out.columns:
             out[col] = None
+
+    # Normalize before any config key, pairing or report label is created.
+    # Otherwise baseline Android 10 and current Android 10.0 become two rows.
+    out["android_version"] = out["android_version"].map(canonical_android_version)
 
     duration_days = []
     device_counts = []
@@ -1291,7 +1297,21 @@ def subscription_default_quality_rows(frame: pd.DataFrame) -> pd.DataFrame:
     mode = working["purchase_mode"].fillna("").astype(str).str.strip().str.lower().str.replace("-", "_", regex=False)
     non_subscription = mode.isin({"non_subscription", "nonsubscription", "one_time", "onetime", "single_purchase", "off", "false", "0"})
     mode_aware = platform.isin({BASE_PLATFORM, "VSPhone"})
-    return working[~(mode_aware & non_subscription)].copy()
+    working = working[~(mode_aware & non_subscription)].copy()
+
+    # UgPhone's 15-day SKU is a known long-term retirement.  Baseline overlay
+    # must not resurrect it into a fresh quality report merely because older
+    # baseline rows still exist.  This rule is intentionally UgPhone-only; all
+    # other products/durations continue to use the normal carry-forward policy.
+    platform = working["platform"].map(normalize_platform_name)
+    if "duration_days" in working.columns:
+        days = pd.to_numeric(working["duration_days"], errors="coerce")
+    elif "duration" in working.columns:
+        days = working["duration"].map(parse_duration_days)
+    else:
+        days = pd.Series([None] * len(working), index=working.index, dtype="float64")
+    retired = (platform == BASE_PLATFORM) & pd.to_numeric(days, errors="coerce").eq(15)
+    return working[~retired].copy()
 
 
 def write_quality_price_report(
