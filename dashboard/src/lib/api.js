@@ -12,7 +12,7 @@ const DASHBOARD_FILES = {
   frontendPriceOverview: "frontend_price_overview.json",
   pairingMatrix: "pairing_matrix.json",
   durationPriceComparison: "duration_price_comparison.json",
-  priceTrends: "price_trends.json",
+  priceTrends: ["price_trends.json.gz", "price_trends.json"],
   priceChangeTracking: "price_change_tracking.json",
   productTextChanges: "product_text_changes.json",
   metricDefinitions: "metric_definitions.json",
@@ -28,9 +28,52 @@ async function fetchJson(url) {
   return response.json();
 }
 
+async function decodeJsonResponse(response, url) {
+  const bytes = new Uint8Array(await response.arrayBuffer());
+  // Some static hosts may transparently decode .gz assets before fetch() sees
+  // the response.  Only run DecompressionStream when the gzip magic bytes are
+  // still present; otherwise parse the returned UTF-8 JSON directly.
+  const isGzip = bytes.length >= 2 && bytes[0] === 0x1f && bytes[1] === 0x8b;
+  if (!isGzip) {
+    return JSON.parse(new TextDecoder("utf-8").decode(bytes));
+  }
+  if (typeof DecompressionStream === "undefined") {
+    throw new Error(`Browser does not support gzip Dashboard assets: ${url}`);
+  }
+  const stream = new Blob([bytes]).stream().pipeThrough(new DecompressionStream("gzip"));
+  return JSON.parse(await new Response(stream).text());
+}
+
+async function fetchDashboardAsset(file) {
+  const candidates = Array.isArray(file) ? file : [file];
+  let lastError = null;
+  for (const candidate of candidates) {
+    const normalized = String(candidate || "").replace(/^\/+/, "");
+    if (!normalized) continue;
+    const url = `${DATA_BASE_URL}${normalized}?v=${Date.now()}`;
+    try {
+      const response = await fetch(url, { cache: "no-store" });
+      if (!response.ok) throw new Error(`${response.status} ${url}`);
+      if (normalized.endsWith(".gz")) return await decodeJsonResponse(response, url);
+      return await response.json();
+    } catch (error) {
+      lastError = error;
+    }
+  }
+  throw lastError || new Error(`Dashboard asset unavailable: ${String(file)}`);
+}
+
+function trendDetailCandidates(file) {
+  const normalized = String(file || "").replace(/^\/+/, "");
+  if (!normalized) return [];
+  if (normalized.endsWith(".json.gz")) return [normalized, normalized.slice(0, -3)];
+  if (normalized.endsWith(".json")) return [`${normalized}.gz`, normalized];
+  return [normalized];
+}
+
 async function loadStaticDashboardData() {
   const entries = await Promise.all(
-    Object.entries(DASHBOARD_FILES).map(async ([key, file]) => [key, await fetchJson(`${DATA_BASE_URL}${file}?v=${Date.now()}`)]),
+    Object.entries(DASHBOARD_FILES).map(async ([key, file]) => [key, await fetchDashboardAsset(file)]),
   );
   return Object.fromEntries(entries);
 }
@@ -159,7 +202,7 @@ export async function loadTrendDetailChunks(files = []) {
   const entries = await Promise.all(
     uniqueFiles.map(async (file) => {
       const normalized = String(file).replace(/^\/+/, "");
-      const payload = await fetchJson(`${DATA_BASE_URL}${normalized}?v=${Date.now()}`);
+      const payload = await fetchDashboardAsset(trendDetailCandidates(normalized));
       return [normalized, payload];
     }),
   );
