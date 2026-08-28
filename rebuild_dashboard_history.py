@@ -8,7 +8,12 @@ from pathlib import Path
 
 import pandas as pd
 
-from cloud_phone_monitor.utils.dashboard_export import export_dashboard_data, output_run_date
+from cloud_phone_monitor.utils.dashboard_export import (
+    PRICE_TRENDS_FILE,
+    export_dashboard_data,
+    output_run_date,
+    read_json_asset,
+)
 from cloud_phone_monitor.utils.price_quality import write_quality_price_report
 
 
@@ -139,6 +144,17 @@ def parse_args() -> argparse.Namespace:
         default=None,
         help="Explicit complete output directory, for example output/latest.",
     )
+    mode = parser.add_mutually_exclusive_group()
+    mode.add_argument(
+        "--incremental",
+        action="store_true",
+        help="Use the schema-9 per-day history cache; only new/changed days are reparsed (default).",
+    )
+    mode.add_argument(
+        "--full",
+        action="store_true",
+        help="Ignore history cache and rebuild every historical collection day.",
+    )
     return parser.parse_args()
 
 
@@ -211,9 +227,12 @@ def main() -> None:
         for item in candidates[:8]:
             print(f"- {output_run_date(item) or 'unknown'}  {item}")
     refresh_quality_report_if_possible(output_dir)
+    history_cache_mode = "full" if args.full else "incremental"
+    print("历史重建模式:", history_cache_mode)
     dashboard_dir = export_dashboard_data(
         output_dir,
         mirror_dirs=[Path("dashboard/public/dashboard_data"), Path("dashboard/dist/dashboard_data")],
+        history_cache_mode=history_cache_mode,
     )
     meta_path = dashboard_dir / "meta.json"
     snapshot_path = dashboard_dir / "current_price_snapshot.json"
@@ -238,9 +257,11 @@ def main() -> None:
     if vs_vip_30:
         print("VSPhone VIP 30天订阅价（本次 products.csv）:", vs_vip_30)
 
-    trends_path = dashboard_dir / "price_trends.json"
+    trends_path = dashboard_dir / PRICE_TRENDS_FILE
+    if not trends_path.exists():
+        trends_path = dashboard_dir / "price_trends.json"
     if trends_path.exists():
-        payload = json.loads(trends_path.read_text(encoding="utf-8"))
+        payload = read_json_asset(trends_path)
         print("价格趋势自然日:", payload.get("history_dates"))
         print("原始采集日期:", payload.get("raw_collection_dates"))
         print("补齐自然日:", payload.get("filled_dates"))
@@ -249,6 +270,21 @@ def main() -> None:
         print("历史点数量:", payload.get("history_point_count"))
         print("carry_forward 点数量:", payload.get("carry_forward_point_count"))
         print("历史运行目录数量:", payload.get("history_run_dir_count"))
+        cache = payload.get("history_cache") or {}
+        if cache:
+            print("历史缓存命中:", cache.get("cache_hits"), "/", cache.get("total_days"))
+            print("本轮重算历史日期数:", cache.get("rebuilt_day_count"))
+
+    storage_path = dashboard_dir / "history_storage.json"
+    if storage_path.exists():
+        storage = json.loads(storage_path.read_text(encoding="utf-8"))
+        raw_mb = float(storage.get("raw_history_bytes") or 0) / (1024 * 1024)
+        stored_mb = float(storage.get("stored_history_bytes") or 0) / (1024 * 1024)
+        print("GitHub Pages 历史存储格式:", storage.get("codec"))
+        print("历史静态资源原始 JSON 体积估算: %.2f MB" % raw_mb)
+        print("历史静态资源压缩后体积: %.2f MB" % stored_mb)
+        print("历史静态资源节省空间: %s%%" % storage.get("space_saving_pct"))
+        print("历史压缩资源文件数:", storage.get("compressed_asset_count"))
     print("看板数据已重建，并已同步到 dashboard/public/dashboard_data 与 dashboard/dist/dashboard_data。")
 
 

@@ -32,6 +32,8 @@ Use this skill when the user asks for:
 6. Do not split output rows by server address. Write all supported servers into `supported_server_regions`.
 7. Treat baseline files and `output/auth/` as private data.
 8. Do not upload auth, cookies, tokens, account information, or private baseline workbooks.
+9. For UgPhone and VSPhone, keep `purchase_mode` explicit: `subscription` means the auto-renew switch is on; `non_subscription` means it is off. Historical rows without the field are subscription rows.
+10. VSPhone collection may toggle only the pricing-page auto-renew filter. It must keep quantity at 1, read each duration card price, exclude the footer order total, restore auto-renew to on, and never click the final create/order button. VSPhone non-subscription collection is limited to 1/3/7/30/90/365 days.
 
 ## Baseline workflow
 
