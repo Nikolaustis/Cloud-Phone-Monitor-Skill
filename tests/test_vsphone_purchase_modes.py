@@ -17,7 +17,6 @@ def _scraper_for_api_test() -> VSPhoneScraper:
     scraper = object.__new__(VSPhoneScraper)
     scraper.config = SimpleNamespace(timezone="UTC")
     scraper.blocked_reason = None
-    scraper.collection_summary = {}
     scraper.selection_contexts = [
         {
             "device_model": "高端真机",
