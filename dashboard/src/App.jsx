@@ -2091,7 +2091,7 @@ function seriesPairingProductModels(series) {
   stableArray(series?.ug_product_models).forEach(addProduct);
 
   // Newly rebuilt history preserves product-level pairing IDs explicitly.  Old
-  // v23 history stored raw signatures such as
+  // Older history stored raw signatures such as
   // "uvip___android_10___3_cores..." and source IDs such as
   // "redfinger_vip_uvip___...".  Decode both formats so the existing Dashboard
   // immediately recovers every original pairing group, even before rebuilding.

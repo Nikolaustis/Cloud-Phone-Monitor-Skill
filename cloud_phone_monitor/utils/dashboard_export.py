@@ -482,7 +482,7 @@ def write_gzip_json(path: Path, payload: Any) -> dict[str, Any]:
 
 
 def read_json_asset(path: Path) -> Any:
-    """Read either normal JSON or a v30 ``*.json.gz`` Dashboard asset."""
+    """Read either normal JSON or a compressed ``*.json.gz`` Dashboard asset."""
     if str(path).lower().endswith(".gz"):
         return json.loads(gzip.decompress(path.read_bytes()).decode("utf-8"))
     return json.loads(path.read_text(encoding="utf-8"))
@@ -4000,7 +4000,7 @@ def collect_historical_trend_points(
 ]:
     """Collect historical prices with a safe per-day incremental cache.
 
-    First v29 rebuild populates ``output/.history_cache/schema_9``. Subsequent
+    The first rebuild populates ``output/.history_cache/schema_9``. Subsequent
     rebuilds reparse only a new/changed collection day; ``--full`` ignores the
     cache and recreates every day. The cache is runtime-only and is never part
     of Dashboard/GitHub data.
@@ -4192,9 +4192,9 @@ def collection_gap_point_for_series(
     date: str,
     collection_coverage: dict[str, dict[Any, set[str]]] | None,
 ) -> dict[str, Any] | None:
-    """Legacy compatibility hook for V25 collection-gap metadata.
+    """Legacy compatibility hook for collection-gap metadata.
 
-    V26 intentionally does *not* infer delisting from a single missing
+    The current logic intentionally does *not* infer delisting from a single missing
     collection-day observation.  A product/region/version can be missed by the
     scraper even when it is still on sale, so missing observations must keep
     the previous valid chart value.  Long-term retired UgPhone 15-day products
@@ -4210,7 +4210,7 @@ def apply_collection_gap_markers(
     date_range: list[str],
     collection_coverage: dict[str, dict[Any, set[str]]] | None,
 ) -> list[dict[str, Any]]:
-    """Keep the V25 public helper but do not manufacture collection gaps.
+    """Keep the public compatibility helper but do not manufacture collection gaps.
 
     Missing collection-day rows are not reliable evidence of discontinuation.
     The chart continuity rule is therefore handled only by
@@ -4243,7 +4243,7 @@ def _carry_forward_point(last_valid: dict[str, Any], date: str, *, missing_sourc
 def fill_points_by_natural_days(points: list[dict[str, Any]], date_range: list[str]) -> list[dict[str, Any]]:
     """Render a continuous natural-day line from the last valid observation.
 
-    V26 restores the pre-V25 semantics requested for ordinary products: if a
+    For ordinary products, if a
     product, Android version or machine room is not captured on a later run,
     keep showing the most recent valid price until another real observation
     replaces it.  A null placeholder such as ``missing_current_products`` is
@@ -4380,7 +4380,7 @@ def update_series_stats_from_points(item: dict[str, Any]) -> None:
     if not points:
         return
 
-    # V26: the rendered current value is the latest valid point, including a
+    # The rendered current value is the latest valid point, including a
     # carry-forward point generated when the latest run did not observe this
     # product/region/version.  Provenance remains visible through price_source
     # and source_collection_date; we do not relabel it as a new current capture.
@@ -5533,7 +5533,7 @@ def export_dashboard_data(output_dir: Path, mirror_dirs: list[Path] | None = Non
         "space_saving_pct": round((1 - stored_history_bytes / raw_history_bytes) * 100, 2) if raw_history_bytes else 0.0,
         "assets": gzip_stats,
         "browser_loading_rule": "Fetch .json.gz as bytes; if gzip magic is present, decompress with DecompressionStream('gzip'); if hosting already decoded it, parse returned UTF-8 JSON directly.",
-        "legacy_fallback": "Frontend also accepts v29 price_trends.json and .json detail chunks during transition.",
+        "legacy_fallback": "Frontend also accepts legacy uncompressed price_trends.json and detail chunks during transition.",
     }
     write_json(dashboard_dir / "history_storage.json", history_storage)
 

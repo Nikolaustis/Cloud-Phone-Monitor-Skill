@@ -21,7 +21,7 @@ def migrate_products_frame(
     *,
     role: str | DatasetRole = DatasetRole.HISTORICAL,
 ) -> pd.DataFrame:
-    """Upgrade old product rows to the v29 contract without mutating the caller.
+    """Upgrade old product rows to the canonical contract without mutating the caller.
 
     This is intentionally additive: old CSV/XLSX files remain readable and no
     historical file is rewritten in place.

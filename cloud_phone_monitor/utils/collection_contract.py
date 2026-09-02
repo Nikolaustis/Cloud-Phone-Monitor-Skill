@@ -1,4 +1,4 @@
-"""Collection completeness contract and run manifest for v29."""
+"""Collection completeness contract and run manifest for the monitor."""
 from __future__ import annotations
 
 import json

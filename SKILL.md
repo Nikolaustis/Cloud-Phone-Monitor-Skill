@@ -4,6 +4,8 @@
 
 Use this skill when the user needs cloud phone product and price monitoring for UgPhone, VSPhone, Redfinger, and LDCloud.
 
+deployment contract: the canonical Windows publishing layer lives under `deployment/windows/`; `C:\Sites` is only the installed runtime target. Do not maintain a separate publisher implementation outside the Skill repository.
+
 The workflow now does two things:
 
 1. Same-product baseline monitoring: compare current product rows against a private baseline workbook.
@@ -148,7 +150,7 @@ Frontend JSON files:
 - `frontend_price_overview.json`
 - `pairing_matrix.json`
 - `duration_price_comparison.json`
-- `price_trends.json`
+- `price_trends.json.gz`
 - `price_change_tracking.json`
 - `product_text_changes.json`
 - `metric_definitions.json`
@@ -157,33 +159,27 @@ Internal-only diagnostics:
 
 - `admin_diagnostics.json`
 
-Core frontend duration buckets are exactly 7, 30, 90, 180, and 365 days. Short/hour/non-core durations must be marked as `duration_bucket = other`, `is_core_duration_bucket = false`, and excluded from core price comparison.
+Core frontend duration buckets are exactly 1, 3, 7, 15, 30, 60, 90, 180, and 365 days. Other durations must be marked as `duration_bucket = other`, `is_core_duration_bucket = false`, and excluded from core price comparison.
 
 ## Daily scheduler
 
 Daily data updates should be handled by an OS-level scheduler, not by the web UI.
 
-Windows:
+On Windows, schedules the canonical publisher installed under `C:\Sites`:
 
 ```powershell
 powershell -ExecutionPolicy Bypass -File scripts/setup_daily_monitor_windows.ps1
 ```
 
-This creates a weekday 10:00 Task Scheduler task named `CloudPhoneMonitorDaily` and writes logs to:
+The canonical source is `deployment/windows/update_cloud_phone_dashboard.ps1`. Its pipeline is: login preflight → collection → incremental history rebuild → Vite build → Dashboard-data validation → mirror to the Dashboard Site repository → Git commit/push.
 
-```text
-output/scheduler_logs/
+If collection/build already succeeded and only publication failed, use:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File C:\Sites\resume_dashboard_publish.ps1
 ```
 
-macOS/Linux:
-
-```bash
-bash scripts/setup_daily_monitor_cron.sh
-```
-
-The script prints a crontab example for weekday 10:00. Review it before adding it with `crontab -e`.
-
-Scheduler state is exported as `schedule_status.json` inside `dashboard_data`. If no scheduler is installed, the dashboard must show `scheduler_enabled: false` / `manual` instead of pretending automatic collection is active.
+macOS/Linux `scripts/setup_daily_monitor_cron.sh` is collection/rebuild only. Scheduler state is exported as `schedule_status.json` inside `dashboard_data`.
 
 ## Core metrics
 
@@ -236,9 +232,11 @@ Only `strong_match` and `adjusted_match` enter the core competitor median for `u
 
 ## GitHub upload guidance
 
-Upload source code and docs only. Do not upload `output/`, `output/auth/`, `page_artifacts/`, `dashboard/node_modules/`, `dashboard/dist/`, or private baseline workbooks under `baselines/`.
+Upload source code and docs only, including `deployment/windows/`, `scripts/`, `tools/`, tests, `deployment_contract.json`, and the installer/source-publisher scripts.
 
+Use `PUBLISH_SOURCE_TO_GITHUB.ps1` when publishing the source repository from Windows; it mirrors the clean package and removes stale tracked `__pycache__`/`.pyc` artifacts.
 
+Do not upload `output/`, `output/auth/`, `baselines/`, `logs/`, `page_artifacts/`, `dashboard/node_modules/`, `dashboard/dist/`, generated `dashboard/public/dashboard_data/`, authentication state, cookies, tokens, account information, or private baseline workbooks.
 
 ## Redfinger price-SKU integrity rule
 
@@ -254,3 +252,12 @@ When no valid Redfinger price SKU is extracted, inspect `page_artifacts/redfinge
 - 看板平台状态拆分为 `collection_status` 与 `baseline_coverage_status`；旧的 `status` 保持与真实采集状态一致。
 - 自动发布脚本不会再因上一轮的产品数量异常阻断下一轮采集，但仍会阻断登录、会话、验证码、反爬与 401/403 等认证/访问问题。
 - 发布前自动将 Git `origin` 更新为 `Nikolaustis/Cloud-Phone-Price-Dashboard-Site`，并推送当前分支。
+
+
+## deployment/publisher rules
+
+1. `deployment_contract.json` is the compatibility contract for the data schema, history storage and publisher capability.
+2. `deployment/windows/` is canonical. Installing overwrites the executable publisher files in `C:\Sites` after backing up prior copies; do not patch an unknown legacy Step 6 in place.
+3. Heavy history is `price_trends.json.gz` plus lazy-loaded `price_trends_chunks/*.json.gz`; uncompressed JSON fallback is rollback-only.
+4. Partial collection coverage is a warning and may publish because carry-forward semantics are explicit. Authentication/block failures, zero-record platforms, corrupt/missing required Dashboard assets, or invalid gzip history must block publication.
+5. If the build is already valid, retry with `C:\Sites\resume_dashboard_publish.ps1`; do not recollect merely because Git push/publish failed.

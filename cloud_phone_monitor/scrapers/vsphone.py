@@ -142,6 +142,10 @@ class VSPhoneScraper(BaseScraper):
                     }
 
     def _records_from_api(self, source_url: str, screenshot_path: str, html_path: str) -> List[ProductRecord]:
+        # Some replay/unit-test paths construct the scraper without calling __init__.
+        # Keep diagnostics lazy-initialised so API parsing remains independently reusable.
+        if not isinstance(getattr(self, "collection_summary", None), dict):
+            self.collection_summary = {}
         records: List[ProductRecord] = []
         crawl_utc, crawl_local = now_pair(self.config.timezone)
 

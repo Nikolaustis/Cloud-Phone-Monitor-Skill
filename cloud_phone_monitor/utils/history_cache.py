@@ -1,4 +1,4 @@
-"""Small local cache primitives used by the v29 incremental history rebuild."""
+"""Small local cache primitives used by the incremental history rebuild."""
 from __future__ import annotations
 
 import pickle

@@ -1,0 +1,28 @@
+[
+  {
+    "platform": "UgPhone",
+    "product_model": "GVIP",
+    "android_version": "10",
+    "cpu": "4 cores",
+    "ram": "4GB",
+    "storage": "64GB",
+    "server_region": "Singapore",
+    "duration": "30 day",
+    "purchase_mode": "subscription",
+    "price": "8.99",
+    "stock_status": "available"
+  },
+  {
+    "platform": "UgPhone",
+    "product_model": "GVIP",
+    "android_version": "10.0",
+    "cpu": "4 cores",
+    "ram": "4GB",
+    "storage": "64GB",
+    "server_region": "Singapore",
+    "duration": "30 day",
+    "purchase_mode": "subscription",
+    "price": "8.99",
+    "stock_status": "available"
+  }
+]

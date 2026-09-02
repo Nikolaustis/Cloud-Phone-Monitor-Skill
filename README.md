@@ -1,11 +1,29 @@
 # Cloud Phone Baseline Price Monitor
 
+> 将原本只存在于本机 `C:\Sites` 的 Dashboard 校验与 GitHub Pages 发布层正式纳入源码仓库。`deployment/windows/` 是发布脚本的唯一源码来源；`C:\Sites` 只是安装目标。
+
 这个 Codex skill 用来采集 UgPhone、VSPhone、Redfinger、LDCloud 的云手机产品价格，并输出两类监测：
 
 - 同商品基准价监测：用固定 baseline 跟踪每日价格、促销文案、缺失和涨跌。
 - 以 UgPhone 为基准的近似配置质量调整比价：不要按套餐名直接比价，而是根据 Android、CPU、内存、存储、地区和购买时长计算相似度，再做质量调整后的 30 天等效价比较。
 
 ## Install
+
+Windows 推荐直接使用安装器：
+
+```powershell
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\INSTALL.ps1
+```
+
+它会把源码覆盖到默认 Skill 目录，并把与当前源码匹配的发布层安装到 `C:\Sites`；`output/`、`baselines/`、`dashboard/node_modules/` 和 `dashboard/dist/` 不会被删除。
+
+首次部署依赖时可运行：
+
+```powershell
+.\INSTALL.ps1 -InstallDependencies
+```
+
+手工安装 Python/Playwright 依赖仍可使用：
 
 ```bash
 python -m pip install -r requirements.txt
@@ -146,54 +164,43 @@ http://127.0.0.1:5173/
 
 ## Daily Auto Update
 
-Dashboard 数据由每日自动任务更新，网页只重新加载已经生成的 `dashboard_data`。
+的 Windows 每日任务运行完整链路，而不是只执行 `python run.py`：
 
-Windows Task Scheduler：
+```text
+登录态预检
+→ 四平台采集
+→ 增量历史重建
+→ Vite build
+→ 数据/压缩历史校验
+→ dist 镜像到 Dashboard Site docs/
+→ git commit / push
+```
+
+规范发布脚本位于源码：
+
+```text
+deployment/windows/update_cloud_phone_dashboard.ps1
+```
+
+安装后实际执行路径为：
+
+```text
+C:\Sites\update_cloud_phone_dashboard.ps1
+```
+
+创建/更新工作日 10:00 的任务：
 
 ```powershell
-powershell -ExecutionPolicy Bypass -File scripts/setup_daily_monitor_windows.ps1
+powershell.exe -ExecutionPolicy Bypass -File scripts/setup_daily_monitor_windows.ps1
 ```
 
-默认创建任务：
+如果本轮采集、历史重建和 build 已经成功，只需要重新上传，不要重新采集：
 
-```text
-CloudPhoneMonitorDaily
+```powershell
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File C:\Sites\resume_dashboard_publish.ps1
 ```
 
-默认每个工作日 10:00 在当前 skill 根目录运行：
-
-```bash
-python run.py
-```
-
-日志写入：
-
-```text
-output/scheduler_logs/
-```
-
-macOS/Linux cron 示例：
-
-```bash
-bash scripts/setup_daily_monitor_cron.sh
-```
-
-脚本会输出 crontab 示例；请审阅后手动加入 `crontab -e`。
-
-手动运行一次采集：
-
-```bash
-python run.py
-```
-
-调度状态会导出到后台/状态 JSON：
-
-```text
-output/latest/dashboard_data/schedule_status.json
-dashboard/public/dashboard_data/schedule_status.json
-```
-
-如果超过 30 小时未更新，Dashboard 显示 warning；超过 48 小时显示 critical/outdated。
+日志写入 `logs/`，调度状态写入 `output/scheduler_logs/schedule_status.json`。macOS/Linux 的 `scripts/setup_daily_monitor_cron.sh` 仅提供 collection/rebuild 示例，不包含 Windows GitHub Pages 发布层。
 
 ## Core Metrics
 
@@ -241,33 +248,31 @@ dashboard/public/dashboard_data/schedule_status.json
 
 ## Upload To GitHub
 
-建议上传源码和文档：
+压缩包本身就是干净的源码树，应该上传：
 
-- `SKILL.md`
-- `README.md`
-- `requirements.txt`
-- `config.example.json`
-- `install_windows.ps1`
-- `run.py`
-- `run_windows.bat`
-- `scripts/`
 - `cloud_phone_monitor/`
-- `dashboard/`
-- `.gitignore`
+- `dashboard/`（不含 `node_modules`、`dist`、生成的 `dashboard_data`）
+- `deployment/windows/`
+- `scripts/`
+- `tools/`
+- `tests/`
+- `run.py`
+- `rebuild_dashboard_history.py`
+- `deployment_contract.json`
+- `INSTALL.ps1`
+- `PUBLISH_SOURCE_TO_GITHUB.ps1`
+- `README.md` / `SKILL.md` / 部署说明文档
+- `.gitignore` / `.gitattributes`
 
-不要上传：
+安装完成后可直接运行：
 
-- `output/`
-- `output/auth/`
-- `baselines/*.xlsx`
-- `page_artifacts/`
-- `__pycache__/`
-- `*.pyc`
-- `dashboard/node_modules/`
-- `dashboard/dist/`
-- 任何登录态、Cookie、Token、账号信息或私有价格基准文件
+```powershell
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\PUBLISH_SOURCE_TO_GITHUB.ps1
+```
 
+它会同步到 `Nikolaustis/Cloud-Phone-Monitor-Skill`，并删除旧仓库中误提交的 `__pycache__/`、`*.pyc` 以及其他运行/私有数据。
 
+永远不要上传：`output/`、`output/auth/`、`baselines/`、`logs/`、`dashboard/node_modules/`、`dashboard/dist/`、登录态、Cookie、Token、账号信息和私有 baseline。
 
 ## Redfinger price-SKU integrity
 
@@ -291,3 +296,11 @@ page_artifacts/api_responses/
 - 看板平台状态拆分为 `collection_status` 与 `baseline_coverage_status`；旧的 `status` 保持与真实采集状态一致。
 - 自动发布脚本不会再因上一轮的产品数量异常阻断下一轮采集，但仍会阻断登录、会话、验证码、反爬与 401/403 等认证/访问问题。
 - 发布前自动将 Git `origin` 更新为 `Nikolaustis/Cloud-Phone-Price-Dashboard-Site`，并推送当前分支。
+
+
+## Deployment Integration
+
+- `deployment_contract.json` 固定数据 schema、历史存储格式和发布能力，用于确保 Skill 与 `C:\Sites` 发布层兼容。
+- `price_trends.json.gz` 与 `price_trends_chunks/*.json.gz` 是历史静态资源格式。
+- `deployment/windows/` 是 `C:\Sites` 发布代码的唯一源码来源；升级时直接覆盖 canonical publisher，不再对旧脚本做脆弱的文本 patch。
+- 发布校验允许业务层 partial coverage（由 carry-forward 处理），但会阻断认证/反爬失败、平台 0 records、缺失/损坏的 Dashboard 必需文件以及 gzip 历史损坏。

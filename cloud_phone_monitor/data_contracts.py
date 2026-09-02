@@ -1,8 +1,7 @@
-"""Canonical data contracts for Cloud Phone Monitor v29.
+"""Canonical data contracts for Cloud Phone Monitor.
 
-The monitor used to encode product identity and missing-data meaning independently
-in several modules.  v29 centralises those semantics so collection, baseline,
-history and Dashboard exports use the same vocabulary.
+Product identity and missing-data semantics are centralized here so collection,
+baseline, history and Dashboard exports use the same vocabulary.
 """
 from __future__ import annotations
 
@@ -17,7 +16,7 @@ from typing import Any, Mapping
 from cloud_phone_monitor.utils.normalize import canonical_android_version
 
 SCHEMA_VERSION = 9
-SKILL_RELEASE = "v30"
+SKILL_RELEASE = "current"
 
 
 class AvailabilityStatus(str, Enum):

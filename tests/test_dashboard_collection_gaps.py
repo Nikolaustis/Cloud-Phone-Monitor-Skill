@@ -62,7 +62,7 @@ def test_missing_current_placeholder_is_replaced_by_carry_forward() -> None:
 def test_missing_duration_does_not_infer_discontinuation() -> None:
     coverage = _coverage()
     coverage["product_dates"][("UgPhone", "gvip", "subscription")] = {"2026-08-20", "2026-08-21"}
-    # The bucket is absent on 8/21, but V26 must not infer that a single missing
+    # The bucket is absent on 8/21, but the current logic must not infer that a single missing
     # duration means the product has been discontinued.
     series = {
         "platform": "UgPhone",
