@@ -1,15 +1,15 @@
 param(
     [string]$SkillRoot = (Join-Path $env:USERPROFILE ".codex\skills\cloud-phone-monitor-skill"),
-    [string]$SiteRepo = "C:\Sites\Cloud-Phone-Dashboard-Site",
+    [string]$PublisherConfigPath = "",
     [switch]$SkipLoginPreflight
 )
-
 $ErrorActionPreference = "Stop"
-# CANONICAL_DAILY_UPDATE
 
 function Resolve-PythonExe {
     $candidates = @("C:\Python314\python.exe", "C:\Python313\python.exe", "C:\Python312\python.exe")
-    foreach ($candidate in $candidates) { if (Test-Path $candidate) { return $candidate } }
+    foreach ($candidate in $candidates) {
+        if (Test-Path $candidate) { return $candidate }
+    }
     $cmd = Get-Command python -ErrorAction SilentlyContinue
     if ($cmd) { return $cmd.Source }
     throw "Python executable not found."
@@ -24,7 +24,9 @@ function Write-SchedulerStatus([string]$Status, [string]$Message = "") {
         if (Test-Path $path) {
             try {
                 $oldStatus = Get-Content -Raw -LiteralPath $path | ConvertFrom-Json
-                if ($oldStatus.schedule_time_local) { $scheduleTime = [string]$oldStatus.schedule_time_local }
+                if ($oldStatus.schedule_time_local) {
+                    $scheduleTime = [string]$oldStatus.schedule_time_local
+                }
             } catch {}
         }
         $payload = [ordered]@{
@@ -44,10 +46,15 @@ function Write-SchedulerStatus([string]$Status, [string]$Message = "") {
 }
 
 $PythonExe = Resolve-PythonExe
+$SitesRoot = $PSScriptRoot
 $LogsDir = Join-Path $SkillRoot "logs"
 New-Item -ItemType Directory -Force -Path $LogsDir | Out-Null
-$LogPath = Join-Path $LogsDir ("daily_publish_" + (Get-Date -Format "yyyyMMdd_HHmmss") + ".log")
+$LogPath = Join-Path $LogsDir ("daily_update_" + (Get-Date -Format "yyyyMMdd_HHmmss") + ".log")
 $TranscriptStarted = $false
+
+if ([string]::IsNullOrWhiteSpace($PublisherConfigPath)) {
+    $PublisherConfigPath = Join-Path $SkillRoot "publisher.local.json"
+}
 
 try {
     Start-Transcript -Path $LogPath -Force | Out-Null
@@ -59,24 +66,31 @@ try {
     Write-Host "============================================================"
 
     Write-Host "Step 0: Check required paths and deployment contract"
-    foreach ($path in @($SkillRoot, (Join-Path $SkillRoot "run.py"), (Join-Path $SkillRoot "rebuild_dashboard_history.py"), (Join-Path $SkillRoot "dashboard\package.json"), (Join-Path $SkillRoot "deployment_contract.json"), "C:\Sites\deployment_contract.json")) {
+    foreach ($path in @(
+        $SkillRoot,
+        (Join-Path $SkillRoot "run.py"),
+        (Join-Path $SkillRoot "rebuild_dashboard_history.py"),
+        (Join-Path $SkillRoot "dashboard\package.json"),
+        (Join-Path $SkillRoot "deployment_contract.json"),
+        (Join-Path $SitesRoot "deployment_contract.json")
+    )) {
         if (!(Test-Path $path)) { throw "Required path not found: $path" }
     }
+
     $SkillContract = Get-Content -Raw -LiteralPath (Join-Path $SkillRoot "deployment_contract.json") | ConvertFrom-Json
-    $PublisherContract = Get-Content -Raw -LiteralPath "C:\Sites\deployment_contract.json" | ConvertFrom-Json
-    if ($SkillContract.schema_version -ne $PublisherContract.schema_version -or
-        $SkillContract.history_storage -ne $PublisherContract.history_storage -or
-        $SkillContract.publisher_capability -ne $PublisherContract.publisher_capability) {
-        throw "Skill/publisher deployment contract mismatch. Re-run INSTALL.ps1 from the current source package."
+    $InstalledContract = Get-Content -Raw -LiteralPath (Join-Path $SitesRoot "deployment_contract.json") | ConvertFrom-Json
+
+    if ($SkillContract.schema_version -ne $InstalledContract.schema_version -or
+        $SkillContract.history_storage -ne $InstalledContract.history_storage -or
+        $SkillContract.publisher_capability -ne $InstalledContract.publisher_capability) {
+        throw "Skill/deployment contract mismatch. Re-run INSTALL.ps1 from the current source package."
     }
-    if ($SkillContract.history_storage -ne "gzip-json-v1") { throw "Unexpected history storage contract: $($SkillContract.history_storage)" }
-    if ($SkillContract.publisher_capability -ne "gzip-history-pages") { throw "Unexpected publisher capability: $($SkillContract.publisher_capability)" }
 
     if (-not $SkipLoginPreflight) {
         Write-Host "Step 1: Login preflight check"
-        $Preflight = "C:\Sites\check_skill_login_state.py"
+        $Preflight = Join-Path $SitesRoot "check_skill_login_state.py"
         if (!(Test-Path $Preflight)) { throw "Login preflight script not found: $Preflight" }
-        & $PythonExe $Preflight --skill-root $SkillRoot --report "C:\Sites\login_preflight_report.json"
+        & $PythonExe $Preflight --skill-root $SkillRoot --report (Join-Path $SitesRoot "login_preflight_report.json")
         if ($LASTEXITCODE -ne 0) { throw "Login preflight failed with exit code $LASTEXITCODE" }
     } else {
         Write-Host "Step 1: Login preflight skipped by explicit switch."
@@ -97,16 +111,23 @@ try {
     if ($LASTEXITCODE -ne 0) { throw "npm run build failed with exit code $LASTEXITCODE" }
 
     Write-Host "Step 5: Validate built JS syntax"
-    $js = Get-ChildItem -Path (Join-Path $SkillRoot "dashboard\dist\assets") -Filter "*.js" | Sort-Object Length -Descending | Select-Object -First 1
+    $js = Get-ChildItem -Path (Join-Path $SkillRoot "dashboard\dist\assets") -Filter "*.js" |
+        Sort-Object Length -Descending |
+        Select-Object -First 1
     if (-not $js) { throw "No built JS asset found." }
+
     node --check $js.FullName
     if ($LASTEXITCODE -ne 0) { throw "Built JS syntax validation failed." }
 
-    Write-Host "Step 6/7: Validate, mirror, commit and push GitHub Pages"
-    & "C:\Sites\publish_dashboard.ps1" -SkillRoot $SkillRoot -SiteRepo $SiteRepo
-    if ($LASTEXITCODE -ne 0) { throw "Dashboard publish failed with exit code $LASTEXITCODE" }
+    Write-Host "Step 6: Validate Dashboard and optionally publish GitHub Pages"
+    & (Join-Path $SitesRoot "publish_dashboard.ps1") `
+        -SkillRoot $SkillRoot `
+        -ConfigPath $PublisherConfigPath
+    if ($LASTEXITCODE -ne 0) {
+        throw "Dashboard validation/publish step failed with exit code $LASTEXITCODE"
+    }
 
-    Write-SchedulerStatus "success" "Collection/build/publish completed"
+    Write-SchedulerStatus "success" "Collection/build completed; optional publishing step completed"
     Write-Host "Cloud Phone Dashboard Daily Update finished successfully."
 } catch {
     Write-SchedulerStatus "failed" $_.Exception.Message
@@ -117,5 +138,7 @@ try {
     Write-Host "============================================================"
     throw
 } finally {
-    if ($TranscriptStarted) { try { Stop-Transcript | Out-Null } catch {} }
+    if ($TranscriptStarted) {
+        try { Stop-Transcript | Out-Null } catch {}
+    }
 }

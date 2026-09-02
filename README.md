@@ -6,7 +6,7 @@ Cloud Phone Baseline Price Monitor 用于采集和比较 UgPhone、VSPhone、Red
 
 - **多平台价格采集**：统一整理 UgPhone、VSPhone、Redfinger、LDCloud 的套餐、配置、地区、购买时长、价格和促销信息。
 - **基准价监测**：将当前价格与已确认的 baseline 比较，识别涨价、降价、缺失和促销文案变化。
-- **同周期价格比较**：按相同购买时长比较不同平台的成交价，避免只按 VIP/KVIP/SVIP 等套餐名称直接横向比较。
+- **同周期价格比较**：按相同购买时长比较不同平台的成交价。
 - **近似配置配对**：根据 Android、CPU、内存、存储、地区和购买时长评估配置相似度。
 - **订阅 / 非订阅价格**：UgPhone 与 VSPhone 通过 `purchase_mode` 区分自动续费开启和关闭时的价格。
 - **历史趋势**：支持当前价、上次价格、7 日均价、30 日均价和长期价格趋势。
@@ -37,18 +37,10 @@ powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\INSTALL.ps1
 powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\INSTALL.ps1 -InstallDependencies
 ```
 
-也可以手工安装 Python 和 Playwright 依赖：
+也可以单独安装依赖：
 
-```bash
-python -m pip install -r requirements.txt
-python -m playwright install chromium
-```
-
-Dashboard 依赖：
-
-```bash
-cd dashboard
-npm ci
+```powershell
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\install_dependencies_windows.ps1
 ```
 
 更完整的安装说明见 [INSTALL_GUIDE.md](INSTALL_GUIDE.md)。
@@ -57,31 +49,21 @@ npm ci
 
 部分平台需要登录后才能读取完整价格。
 
-需要人工登录时可使用可见浏览器：
-
 ```bash
 python run.py --headed
-```
-
-已保存的 Playwright 登录状态可以通过参数使用，例如：
-
-```bash
-python run.py --platform Redfinger --storage-state output/auth/redfinger_state.json
 ```
 
 登录状态、Cookie、Token 和账号信息属于本地私有数据，不应上传或共享。
 
 ## 基本使用
 
-### 1. 采集
+采集：
 
 ```bash
 python run.py
 ```
 
-### 2. 初始化 baseline
-
-第一次确认采集结果无误后：
+第一次确认采集结果无误后初始化 baseline：
 
 ```bash
 python run.py --init-baseline
@@ -93,64 +75,9 @@ python run.py --init-baseline
 baselines/products_baseline.xlsx
 ```
 
-### 3. 可选运行模式
-
-只采集产品表，不进行同商品 baseline 比较：
-
-```bash
-python run.py --skip-baseline-monitor
-```
-
-跳过 UgPhone 近似配置质量调整比价：
-
-```bash
-python run.py --skip-quality-price-monitor
-```
-
-使用自定义质量比价配置：
-
-```bash
-python run.py --quality-price-config path/to/config.json
-```
-
-## 输出
-
-每次采集会创建类似目录：
-
-```text
-output/cloud_phone_monitor_YYYYMMDD_HHMMSS/
-```
-
-主要文件包括：
-
-- `products.csv`
-- `products.xlsx`
-- `products.jsonl`
-- `product_brief.txt`
-- `daily_changes.xlsx`
-- `baseline_products_updated.xlsx`
-- `quality_price_report.xlsx`
-- `run_summary.json`
-- `api_candidates.json`
-- `page_artifacts/`
-
-`quality_price_report.xlsx` 主要包括：
-
-- 配置配对建议
-- 质量调整价格明细
-- UG 相对竞品指数
-- 变价合理性判断
-- 指标说明
-
 ## Dashboard
 
-Dashboard 位于：
-
-```text
-dashboard/
-```
-
-本地开发查看：
+本地查看：
 
 ```bash
 cd dashboard
@@ -172,111 +99,45 @@ cd dashboard
 npm run build
 ```
 
-主要页面：
-
-- `#/price-overview`：价格概览
-- `#/pairing`：配置配对
-- `#/duration-prices`：同购买周期价格比较
-- `#/trends`：价格趋势
-- `#/price-changes`：价格变化
-- `#/product-text`：商品/促销文本
-- `#/metrics`：指标说明
-
 Dashboard 是只读界面，不包含购买、支付、续费或下单能力。
 
-## 价格比较原则
+## 可选：发布到 GitHub Pages
 
-不同平台的 VIP、KVIP、SVIP、XVIP 等名称不能直接视为同等级配置。
-
-核心比较优先使用：
-
-- Android 版本
-- CPU 核心数
-- RAM
-- 存储
-- 支持地区
-- 购买时长
-- 当前成交价
-
-配置相似度分为：
-
-- `strong_match`：相似度 ≥ 90
-- `adjusted_match`：75–89
-- `weak_match`：60–74
-- `not_comparable`：低于 60
-
-`strong_match` 和 `adjusted_match` 可进入核心竞品价格中位数；`weak_match` 只作为参考。
-
-## 核心购买周期
-
-Dashboard 的主要比较周期为：
+默认情况下，自动更新只执行：
 
 ```text
-1 / 3 / 7 / 15 / 30 / 60 / 90 / 180 / 365 天
+采集 → 历史重建 → Dashboard 构建 → 数据校验
 ```
 
-其他周期会保留为非核心数据，但不会混入核心同周期比较。
+不会执行 Git push。
+
+如果希望把构建后的 Dashboard 发布到自己的 GitHub Pages 仓库：
+
+1. 将 `publisher.local.example.json` 复制为 `publisher.local.json`。
+2. 在 `publisher.local.json` 中填写自己的 `dashboard_site_remote`。
+3. 可选填写本地仓库路径、分支和提交信息前缀。
+
+`publisher.local.json` 已被 `.gitignore` 排除，仅作为本地配置使用。
 
 ## 缺失数据与历史连续性
 
-采集不到某个普通商品并不等于商品已经下架。
-
-系统会区分：
-
-- 当前真实采集值
-- 暂时缺失采集
-- 不可售
-- 已下架
-- 历史沿用值
-- 不适用或未知状态
-
-只有在有充分证据时才会把商品视为不可售或下架；普通短期采集缺失可沿用最近一次真实观测值，以保持历史趋势连续。
+采集不到某个普通商品并不等于商品已经下架。系统会区分当前真实采集值、暂时缺失采集、不可售、已下架、历史沿用值以及未知状态。
 
 ## 数据安全
 
-以下内容应始终保留在本地：
+以下内容应保留在本地：
 
 ```text
 output/auth/
 baselines/
 output/.history_cache/
+publisher.local.json
 ```
 
-不要公开：
+不要公开 Cookie、Token、Playwright storage state、持久化浏览器登录配置、账号信息、私有 baseline、本地发布配置或未脱敏诊断数据。
 
-- Cookie
-- Token
-- Playwright storage state
-- 持久化浏览器登录配置
-- 账号信息
-- 私有 baseline
-- 未脱敏的原始诊断数据
+详见 [DEPLOYMENT_DATA_GUIDE.md](DEPLOYMENT_DATA_GUIDE.md)。
 
-详细说明见 [DEPLOYMENT_DATA_GUIDE.md](DEPLOYMENT_DATA_GUIDE.md)。
-
-## 数据质量与验证
-
-系统会对登录状态、平台采集结果、核心 Dashboard 数据和历史压缩文件进行校验。部分套餐临时缺失通常会被标记为覆盖不足，而认证失败、平台完全无记录、关键数据文件损坏等情况会被视为严重异常。
-
-详见 [VALIDATION.md](VALIDATION.md)。
-
-## Redfinger 价格完整性
-
-Redfinger 的有效价格必须来自：
-
-- 已登录购买页的有效价格接口；或
-- 同时包含**价格**和**购买时长**的可见套餐卡片。
-
-游戏推荐、钱包余额、导航文字、加载骨架和单独的套餐标签不会被当作价格 SKU 写入产品表。
-
-如果 Redfinger 没有采集到有效价格，可查看本次输出中的诊断信息：
-
-```text
-page_artifacts/redfinger_price_diagnostic.json
-page_artifacts/screenshots/
-page_artifacts/api_responses/
-```
-
-## License / Disclaimer
+## Disclaimer
 
 本项目用于价格监测、数据整理和业务分析。使用时应遵守相关网站的服务条款、账号规则和当地法律法规。

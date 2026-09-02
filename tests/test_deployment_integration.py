@@ -24,22 +24,57 @@ def _write_json(path: Path, value) -> None:
     path.write_text(json.dumps(value, ensure_ascii=False), encoding="utf-8")
 
 
-def test_deployment_contract_and_deployment_files_exist() -> None:
+def test_public_deployment_contract_and_files() -> None:
     assert SKILL_RELEASE == "current"
     assert SCHEMA_VERSION == 9
+
     contract = json.loads((ROOT / "deployment_contract.json").read_text(encoding="utf-8"))
-    assert contract["publisher_capability"] == "gzip-history-pages"
-    assert contract["history_storage"] == "gzip-json-v1"
+    assert contract == {
+        "schema_version": 9,
+        "history_storage": "gzip-json-v1",
+        "publisher_capability": "gzip-history-pages",
+    }
+
+    assert (ROOT / ".gitignore").is_file()
+    assert (ROOT / ".gitattributes").is_file()
+    assert (ROOT / "publisher.local.example.json").is_file()
+    assert not (ROOT / "publisher.local.json").exists()
+    assert not (ROOT / "PUBLISH_SOURCE_TO_GITHUB.ps1").exists()
+    assert not (ROOT / "install_windows.ps1").exists()
+    assert (ROOT / "install_dependencies_windows.ps1").is_file()
+
+
+def test_public_publisher_has_no_bound_remote() -> None:
     for rel in (
-        "deployment/windows/update_cloud_phone_dashboard.ps1",
+        "deployment_contract.json",
         "deployment/windows/publish_dashboard.ps1",
-        "deployment/windows/resume_dashboard_publish.ps1",
-        "deployment/windows/validate_cloud_phone_dashboard.py",
-        "deployment/windows/check_skill_login_state.py",
-        "deployment/windows/install_deployment.ps1",
-        "deployment/windows/verify_deployment.ps1",
+        "deployment/windows/update_cloud_phone_dashboard.ps1",
+        "INSTALL.ps1",
+        "publisher.local.example.json",
     ):
-        assert (ROOT / rel).is_file(), rel
+        text = (ROOT / rel).read_text(encoding="utf-8")
+        assert "github.com/YOUR_ACCOUNT/YOUR_DASHBOARD_REPO.git" in text or "https://github.com/" not in text
+
+    publisher = (ROOT / "deployment/windows/publish_dashboard.ps1").read_text(
+        encoding="utf-8"
+    )
+    assert "publisher.local.json" in publisher
+    assert "GitHub Pages publishing is not configured" in publisher
+
+
+def test_installer_is_user_install_only() -> None:
+    installer = (ROOT / "INSTALL.ps1").read_text(encoding="utf-8")
+    assert "PUBLISH_SOURCE_TO_GITHUB.ps1" not in installer
+    assert "PATCH_NOTES" not in installer
+    assert "release_contract.json" not in installer
+    assert "test_v*.py" not in installer
+
+    deployment_installer = (
+        ROOT / "deployment/windows/install_deployment.ps1"
+    ).read_text(encoding="utf-8")
+    assert "obsolete release-branded" not in deployment_installer
+    assert "verify_v*" not in deployment_installer
+    assert "Canonical deployment" not in deployment_installer
 
 
 def test_validator_accepts_gzip_and_partial_coverage(tmp_path: Path) -> None:
@@ -80,6 +115,7 @@ def test_validator_accepts_gzip_and_partial_coverage(tmp_path: Path) -> None:
         data / "history_storage.json",
         {"codec": "gzip-json-v1", "price_trends_file": "price_trends.json.gz"},
     )
+
     trend = {"history_end_date": "2026-09-01", "trend_detail_files": [], "series": []}
     (data / "price_trends.json.gz").write_bytes(
         gzip.compress(json.dumps(trend).encode("utf-8"), compresslevel=9, mtime=0)

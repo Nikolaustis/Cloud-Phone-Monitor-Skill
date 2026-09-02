@@ -1,0 +1,6 @@
+{
+  "dashboard_site_remote": "https://github.com/YOUR_ACCOUNT/YOUR_DASHBOARD_REPO.git",
+  "dashboard_site_repo": "",
+  "branch": "main",
+  "commit_prefix": "Auto publish dashboard"
+}
