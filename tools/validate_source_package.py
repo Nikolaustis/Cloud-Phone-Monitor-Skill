@@ -15,12 +15,23 @@ FORBIDDEN_DIRS = {
     ".pytest_cache",
     ".git",
 }
-FORBIDDEN_SUFFIXES = {".pyc", ".log", ".xlsx", ".xls", ".csv", ".jsonl"}
+
+FORBIDDEN_SUFFIXES = {
+    ".pyc",
+    ".log",
+    ".xlsx",
+    ".xls",
+    ".csv",
+    ".jsonl",
+}
+
 FORBIDDEN_FILES = {
     "publisher.local.json",
     "PUBLISH_SOURCE_TO_GITHUB.ps1",
     "install_windows.ps1",
+    "patch_external_ugphone_preflight.py",
 }
+
 REQUIRED = {
     ".gitignore",
     ".gitattributes",
@@ -38,9 +49,21 @@ REQUIRED = {
     "deployment/windows/validate_cloud_phone_dashboard.py",
     "scripts/setup_daily_monitor_windows.ps1",
 }
+
 TEXT_SUFFIXES = {
-    ".py", ".ps1", ".js", ".jsx", ".json", ".md", ".txt", ".sh", ".bat", ".yml", ".yaml"
+    ".py",
+    ".ps1",
+    ".js",
+    ".jsx",
+    ".json",
+    ".md",
+    ".txt",
+    ".sh",
+    ".bat",
+    ".yml",
+    ".yaml",
 }
+
 CONCRETE_GITHUB_REMOTE = re.compile(
     r"https://github\.com/(?!YOUR_ACCOUNT/)[^/\s\"']+/[^/\s\"']+\.git",
     re.IGNORECASE,
@@ -61,6 +84,7 @@ def validate(root: Path) -> list[str]:
     for current, dirs, files in os.walk(root):
         cur = Path(current)
         rel_parts = set(cur.relative_to(root).parts)
+
         if rel_parts & FORBIDDEN_DIRS:
             problems.append(f"forbidden directory included: {cur.relative_to(root)}")
             dirs[:] = []
