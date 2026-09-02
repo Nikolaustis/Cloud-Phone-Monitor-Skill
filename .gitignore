@@ -1,0 +1,33 @@
+# Runtime/private data
+output/
+baselines/
+logs/
+.env
+*.log
+*.xlsx
+*.xls
+*.csv
+*.jsonl
+*_state.json
+
+# Python
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.venv/
+venv/
+
+# Dashboard generated/dependencies
+dashboard/node_modules/
+dashboard/dist/
+dashboard/public/dashboard_data/
+
+# Editors/OS
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+
+# Local deployment clones/backups
+*.bak_*
+backup_before_deployment_*/
