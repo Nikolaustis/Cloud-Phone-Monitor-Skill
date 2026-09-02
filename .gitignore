@@ -9,6 +9,7 @@ logs/
 *.csv
 *.jsonl
 *_state.json
+publisher.local.json
 
 # Python
 __pycache__/
