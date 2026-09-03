@@ -23,6 +23,14 @@ def login_command(skill_root: Path, platform: str) -> str:
     return f'cd "{skill_root}" && powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\\LOGIN.ps1 {platform}'
 
 
+def agent_login_command(skill_root: Path, platform: str, phase: str) -> str:
+    switch = "-Start" if phase == "start" else "-Complete"
+    return (
+        f'cd "{skill_root}" && powershell.exe -NoProfile -ExecutionPolicy Bypass '
+        f'-File .\\LOGIN.ps1 {platform} {switch}'
+    )
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description="Validate local auth state before the scheduled Cloud Phone Monitor run.")
     parser.add_argument("--skill-root", required=True)
@@ -55,10 +63,13 @@ def main() -> int:
             "status": "ok" if ok else "missing_or_empty_storage_state",
             "state_file": str(path),
             "repair_command": login_command(skill_root, platform),
+            "agent_start_command": agent_login_command(skill_root, platform, "start"),
+            "agent_complete_command": agent_login_command(skill_root, platform, "complete"),
         }
         print(f"[{ 'OK' if ok else 'FAIL' }] {platform}: {report['platforms'][platform]['status']}")
         if not ok:
-            print(f"       Repair: .\\LOGIN.ps1 {platform}")
+            print(f"       Manual repair: .\\LOGIN.ps1 {platform}")
+            print(f"       Agent phase 1: .\\LOGIN.ps1 {platform} -Start")
 
     ug_state = auth_dir / "ugphone_state.json"
     ug_profile = auth_dir / "ugphone_profile"
@@ -71,6 +82,8 @@ def main() -> int:
         "persistent_profile": str(ug_profile),
         "runtime_context": str(ug_runtime),
         "repair_command": login_command(skill_root, "UgPhone"),
+        "agent_start_command": agent_login_command(skill_root, "UgPhone", "start"),
+        "agent_complete_command": agent_login_command(skill_root, "UgPhone", "complete"),
     }
 
     if ug_base_ok and not args.skip_live_ugphone:
@@ -100,7 +113,8 @@ def main() -> int:
     report["platforms"]["UgPhone"] = ug_result
     print(f"[{ 'OK' if ug_result['ok'] else 'FAIL' }] UgPhone: {ug_result['status']}")
     if not ug_result["ok"]:
-        print("       Repair: .\\LOGIN.ps1 UgPhone")
+        print("       Manual repair: .\\LOGIN.ps1 UgPhone")
+        print("       Agent phase 1: .\\LOGIN.ps1 UgPhone -Start")
 
     report["all_ok"] = all(bool(row.get("ok")) for row in report["platforms"].values())
     report_path.parent.mkdir(parents=True, exist_ok=True)
@@ -112,6 +126,8 @@ def main() -> int:
         print("")
         print("Collector authentication must be repaired in the LOCAL Playwright Chromium browser.")
         print("Do not use ChatGPT Work / Cloud Browser for collector login; that browser session is isolated from output/auth/.")
+        print("For an agent with LOCAL shell access, use LOGIN.ps1 <Platform> -Start; after the user finishes login in local Chromium, use -Complete.")
+        print("If LOCAL shell access is unavailable, stop instead of substituting Cloud Browser.")
         print(f'Run the repair command(s) from: {skill_root}')
 
     return 0 if report["all_ok"] else 2

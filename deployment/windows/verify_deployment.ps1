@@ -48,6 +48,12 @@ $LoginScript = Get-Content -Raw -LiteralPath (Join-Path $SkillRoot "LOGIN.ps1")
 if ($LoginScript -notmatch "cloud_phone_monitor\.login_wait_for_signal") {
     throw "Installed LOGIN.ps1 does not reference the canonical local Playwright login helper."
 }
+if ($LoginScript -notmatch '\[switch\]\$Start' -or
+    $LoginScript -notmatch '\[switch\]\$Complete' -or
+    $LoginScript -notmatch 'LOGIN_AGENT_STATE=WAITING_FOR_USER' -or
+    $LoginScript -notmatch 'LOGIN_AGENT_STATE=SAVED_AND_VERIFIED') {
+    throw "Installed LOGIN.ps1 does not contain the required two-stage local agent login controller."
+}
 
 $DistDir = Join-Path $SkillRoot "dashboard\dist"
 if (Test-Path (Join-Path $DistDir "dashboard_data")) {
@@ -59,3 +65,4 @@ if (Test-Path (Join-Path $DistDir "dashboard_data")) {
 
 Write-Host "Deployment verification passed."
 Write-Host "Local login entrypoint: $SkillRoot\LOGIN.ps1"
+Write-Host "Agent login protocol: -Start -> user login in local Chromium -> -Complete"

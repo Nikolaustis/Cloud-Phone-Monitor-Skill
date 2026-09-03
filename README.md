@@ -49,7 +49,9 @@ powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\install_dependencies_w
 
 用于自动采集的登录必须在 Skill 启动的**本机 Playwright Chromium** 中完成。ChatGPT Work / Cloud Browser 的浏览器会话与本机采集器隔离，不能作为 `output/auth/` 的登录状态来源。
 
-安装后在 Skill 根目录运行：
+### 人工 PowerShell 登录
+
+在 Skill 根目录直接运行：
 
 ```powershell
 .\LOGIN.ps1 UgPhone
@@ -58,9 +60,25 @@ powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\install_dependencies_w
 .\LOGIN.ps1 LDCloud
 ```
 
-流程会自动启动本机 Chromium。请在弹出的窗口中完成登录，保持窗口打开，然后回到 PowerShell 按 Enter。脚本会自动创建完成信号、验证并保存登录状态。
+脚本会启动本机 Chromium。请在弹出的窗口中完成登录，保持窗口打开，然后回到 PowerShell 按 Enter。
 
-UgPhone 会保存并验证三层本地认证材料：
+### Work / Codex 本地 Agent 两阶段登录
+
+当聊天中的 Agent **确实具备当前电脑的本地 Windows shell / 项目文件系统执行能力**时，应使用两阶段模式，而不是让 Agent 打开 Cloud Browser：
+
+```powershell
+# 1. Agent 启动本机 Chromium，然后立即把控制权交还给聊天
+.\LOGIN.ps1 UgPhone -Start
+
+# 2. 用户在本机 Chromium 完成登录，并在聊天中回复“已完成”后
+.\LOGIN.ps1 UgPhone -Complete
+```
+
+`-Start` 成功会输出 `LOGIN_AGENT_STATE=WAITING_FOR_USER`；`-Complete` 验证成功会输出 `LOGIN_AGENT_STATE=SAVED_AND_VERIFIED`。同样适用于 VSPhone、Redfinger、LDCloud。还可使用 `-Status` 查看会话状态，或用 `-Cancel` 放弃未完成会话。
+
+如果当前聊天**没有本地 shell 能力**，应停止自动登录流程，不得改用 Cloud Browser；此时请手工运行上面的 `LOGIN.ps1` 命令。
+
+UgPhone 会继续保存并验证三层本地认证材料：
 
 ```text
 output/auth/ugphone_profile/                 # 长期主要登录态
@@ -68,9 +86,11 @@ output/auth/ugphone_state.json               # Playwright storage state
 output/auth/ugphone_runtime_context.json     # 短期运行桥接
 ```
 
+两阶段 Agent 登录会额外临时创建 `output/auth/ugphone_login_agent_session.json`（其他平台使用各自前缀），只记录本地进程与路径等编排信息，完成或取消后自动删除。
+
 `python run.py --headed` 仍可用于可见模式调试采集，但不再作为正式的首次登录/保存入口。
 
-登录状态、Cookie、Token 和账号信息属于本地私有数据，不应上传或共享。
+登录状态、Cookie、Token、Agent 控制文件和账号信息都属于本地私有数据，不应上传或共享。
 
 ## 基本使用
 

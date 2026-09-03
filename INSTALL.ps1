@@ -76,5 +76,6 @@ if ($InstallDailyTask) {
 Write-Host ""
 Write-Host "Installation completed."
 Write-Host "Local login:    $SkillRoot\LOGIN.ps1 <UgPhone|VSPhone|Redfinger|LDCloud>"
+Write-Host "Agent login:    $SkillRoot\LOGIN.ps1 <Platform> -Start  /  -Complete"
 Write-Host "Daily updater:  $SitesRoot\update_cloud_phone_dashboard.ps1"
 Write-Host "GitHub Pages publishing is disabled unless publisher.local.json is configured."

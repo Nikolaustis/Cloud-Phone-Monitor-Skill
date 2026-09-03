@@ -50,28 +50,32 @@ function Show-LoginRepairCommands([string]$ReportPath) {
     Write-Host "Login state repair:"
     Write-Host "Collector login must be completed in the LOCAL Chromium opened by LOGIN.ps1."
     Write-Host "Do not use ChatGPT Work / Cloud Browser for collector authentication."
+    Write-Host "If an agent has LOCAL shell access, use -Start and then -Complete after the user finishes login."
+    Write-Host "If LOCAL shell access is unavailable, stop instead of substituting Cloud Browser."
     Write-Host ""
     Write-Host "Set-Location `"$SkillRoot`""
 
-    $shown = $false
+    $failedPlatforms = @()
     if (Test-Path $ReportPath) {
         try {
             $report = Get-Content -Raw -LiteralPath $ReportPath | ConvertFrom-Json
             foreach ($property in $report.platforms.PSObject.Properties) {
                 if ($property.Value.ok -ne $true) {
-                    Write-Host ".\LOGIN.ps1 $($property.Name)"
-                    $shown = $true
+                    $failedPlatforms += [string]$property.Name
                 }
             }
         } catch {}
     }
-    if (-not $shown) {
-        Write-Host ".\LOGIN.ps1 UgPhone"
-        Write-Host ".\LOGIN.ps1 VSPhone"
-        Write-Host ".\LOGIN.ps1 Redfinger"
-        Write-Host ".\LOGIN.ps1 LDCloud"
+    if ($failedPlatforms.Count -eq 0) {
+        $failedPlatforms = @("UgPhone", "VSPhone", "Redfinger", "LDCloud")
     }
-    Write-Host ""
+
+    foreach ($platform in $failedPlatforms) {
+        Write-Host "Manual: .\LOGIN.ps1 $platform"
+        Write-Host "Agent phase 1: .\LOGIN.ps1 $platform -Start"
+        Write-Host "Agent phase 2 (after user says 已完成): .\LOGIN.ps1 $platform -Complete"
+        Write-Host ""
+    }
 }
 
 $PythonExe = Resolve-PythonExe

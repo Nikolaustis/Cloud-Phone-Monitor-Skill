@@ -76,6 +76,19 @@ def test_installer_is_user_install_only() -> None:
     assert "ChatGPT Work / Cloud Browser" in login_script
     assert "--persistent-profile" in login_script
     assert "ugphone_runtime_context.json" in login_script
+    assert "[switch]$Start" in login_script
+    assert "[switch]$Complete" in login_script
+    assert "[switch]$Status" in login_script
+    assert "[switch]$Cancel" in login_script
+    assert "LOGIN_AGENT_STATE=WAITING_FOR_USER" in login_script
+    assert "LOGIN_AGENT_STATE=SAVED_AND_VERIFIED" in login_script
+    assert "login_agent_session.json" in login_script
+
+    skill_text = (ROOT / "SKILL.md").read_text(encoding="utf-8")
+    assert "Authentication execution routing (hard rule)" in skill_text
+    assert "LOGIN.ps1 <Platform> -Start" in skill_text
+    assert "LOGIN.ps1 <Platform> -Complete" in skill_text
+    assert "NEVER" in skill_text and "Cloud Browser" in skill_text
 
     deployment_installer = (
         ROOT / "deployment/windows/install_deployment.ps1"

@@ -82,6 +82,37 @@ def validate(root: Path) -> list[str]:
         if (root / forbidden).exists():
             problems.append(f"maintainer/private file must not be public: {forbidden}")
 
+    login_path = root / "LOGIN.ps1"
+    if login_path.is_file():
+        try:
+            login_text = login_path.read_text(encoding="utf-8")
+        except UnicodeDecodeError:
+            login_text = ""
+        for marker in (
+            "cloud_phone_monitor.login_wait_for_signal",
+            "[switch]$Start",
+            "[switch]$Complete",
+            "LOGIN_AGENT_STATE=WAITING_FOR_USER",
+            "LOGIN_AGENT_STATE=SAVED_AND_VERIFIED",
+        ):
+            if marker not in login_text:
+                problems.append(f"LOGIN.ps1 missing required local-agent marker: {marker}")
+
+    skill_path = root / "SKILL.md"
+    if skill_path.is_file():
+        try:
+            skill_text = skill_path.read_text(encoding="utf-8")
+        except UnicodeDecodeError:
+            skill_text = ""
+        for marker in (
+            "Authentication execution routing (hard rule)",
+            "LOGIN.ps1 <Platform> -Start",
+            "LOGIN.ps1 <Platform> -Complete",
+            "Do not substitute Cloud Browser",
+        ):
+            if marker not in skill_text:
+                problems.append(f"SKILL.md missing authentication-routing marker: {marker}")
+
     for current, dirs, files in os.walk(root):
         cur = Path(current)
         rel_parts = set(cur.relative_to(root).parts)

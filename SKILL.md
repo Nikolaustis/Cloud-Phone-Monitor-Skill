@@ -38,6 +38,60 @@ Use this skill when the user asks for:
 10. VSPhone collection may change only the pricing-page auto-renew filter, must keep quantity at 1, read duration-card prices, ignore the footer order total, restore auto-renew when appropriate, and never click the final create/order button.
 11. Authentication used by the local collector must originate from a local Playwright browser context. A ChatGPT Work / Cloud Browser session is isolated and must never be treated as a source for local collector cookies, storage state, persistent profiles, or runtime context.
 
+## Authentication execution routing (hard rule)
+
+Authentication-state tasks are **local-execution tasks**, not browser-navigation tasks. This routing rule takes precedence over general browsing behavior.
+
+Trigger this route whenever the user asks to log in, sign in, save/record/refresh authentication state, repair an expired login, or continue after a login preflight failure for UgPhone, VSPhone, Redfinger, or LDCloud.
+
+For these requests:
+
+1. **NEVER** open the platform in ChatGPT Work / Cloud Browser for collector authentication.
+2. **NEVER** ask the user to finish collector login inside a browser page opened by ChatGPT Cloud Browser.
+3. **NEVER** attempt to read, export, copy, or convert Cloud Browser cookies/localStorage/sessionStorage into local collector auth files.
+4. First determine whether a shell can execute against the user's **local Windows project/Skill filesystem**.
+5. If local shell execution is available, start the two-stage local login controller:
+
+   ```powershell
+   .\LOGIN.ps1 <Platform> -Start
+   ```
+
+   Wait until the command reports `LOGIN_AGENT_STATE=WAITING_FOR_USER`. Then stop tool execution and tell the user to complete login in the newly opened local Chromium window and reply **“已完成”** in the chat.
+6. When the user replies **“已完成”** in the context of an active login session, do not browse the web. Resume the same local authentication flow with:
+
+   ```powershell
+   .\LOGIN.ps1 <Platform> -Complete
+   ```
+
+   Treat `LOGIN_AGENT_STATE=SAVED_AND_VERIFIED` as success.
+7. If the local shell or local Skill filesystem is unavailable, **STOP**. Do not substitute Cloud Browser. Tell the user that collector authentication requires local execution and provide the exact `LOGIN.ps1` command instead.
+8. If the user is operating PowerShell manually rather than through an agent, the original interactive form remains valid:
+
+   ```powershell
+   .\LOGIN.ps1 <Platform>
+   ```
+
+9. `-Status` may be used to inspect an active two-stage session, and `-Cancel` may be used to discard an abandoned session without deleting previously saved auth state.
+10. If `-Start` returns success but no local Chromium window appears, or if `-Complete` reports that the detached local login process no longer exists, treat that as a **local execution/persistence failure**. Do not fall back to Cloud Browser. Offer `-Status`, restart with `-Start`, or use the manual interactive `LOGIN.ps1 <Platform>` flow.
+
+The expected conversational protocol is therefore:
+
+```text
+user asks to record/refresh login state
+        ↓
+local shell: LOGIN.ps1 <Platform> -Start
+        ↓
+LOGIN_AGENT_STATE=WAITING_FOR_USER
+        ↓
+assistant asks user to complete login in LOCAL Chromium and reply “已完成”
+        ↓
+user replies “已完成”
+        ↓
+local shell: LOGIN.ps1 <Platform> -Complete
+        ↓
+LOGIN_AGENT_STATE=SAVED_AND_VERIFIED
+```
+
 ## Installation
 
 From the project root:
@@ -93,7 +147,9 @@ python run.py --quality-price-config path/to/config.json
 
 ## Login workflow
 
-The canonical login entry point is the local PowerShell wrapper:
+`LOGIN.ps1` supports both manual PowerShell use and a two-stage agent flow. Both routes launch the existing `cloud_phone_monitor.login_wait_for_signal` helper in a **local headed Playwright Chromium** process.
+
+Manual PowerShell login:
 
 ```powershell
 .\LOGIN.ps1 UgPhone
@@ -102,7 +158,19 @@ The canonical login entry point is the local PowerShell wrapper:
 .\LOGIN.ps1 LDCloud
 ```
 
-`LOGIN.ps1` launches the existing `cloud_phone_monitor.login_wait_for_signal` helper in a local headed Playwright Chromium process, waits until that browser is ready, asks the user to complete the login there, creates the local signal after Enter is pressed, then waits for the Python helper to validate and persist the state.
+Agent-controlled login is intentionally split across two invocations so the local browser can remain open while the user returns to chat:
+
+```powershell
+# Phase 1: start local Chromium and return control to the agent
+.\LOGIN.ps1 UgPhone -Start
+
+# Phase 2: after the user says “已完成” in chat
+.\LOGIN.ps1 UgPhone -Complete
+```
+
+The same `-Start` / `-Complete` pattern applies to VSPhone, Redfinger and LDCloud. `-Status` reports the current local login-session state; `-Cancel` terminates an abandoned local login session without deleting previously saved authentication files.
+
+The two-stage controller stores only local orchestration metadata under `output/auth/<platform>_login_agent_session.json`; this file contains the helper process id and local paths, remains private, and is removed after completion/cancellation. The actual authentication artifacts continue to be written by the existing Python login helper.
 
 Do not complete collector authentication in ChatGPT Work / Cloud Browser. Its Cookie, localStorage and sessionStorage data are isolated from the local project and cannot become `output/auth/` state.
 
@@ -116,11 +184,11 @@ output/auth/ugphone_runtime_context.json     # short-lived runtime bridge
 
 For UgPhone, the login helper verifies authenticated purchase-page business data and pricing API evidence before saving, then reopens the persistent profile in headed and scheduled-task-equivalent headless modes. The runtime snapshot is only a short-lived fill-missing bridge and must not override newer state already present in the persistent profile.
 
-VSPhone, Redfinger and LDCloud use the same `LOGIN.ps1` user entry point and save platform-specific Playwright storage state. Their current platform-specific live-auth verification is less strict than UgPhone, so do not describe those three as having the same purchase/API-level proof unless their verifier is strengthened later.
+VSPhone, Redfinger and LDCloud use the same local `LOGIN.ps1` controller and save platform-specific Playwright storage state. Their current platform-specific live-auth verification is less strict than UgPhone, so do not describe those three as having the same purchase/API-level proof unless their verifier is strengthened later.
 
 `python run.py --headed` is a visible collection/debug mode, not the canonical first-login persistence workflow.
 
-Saved login states must remain local under `output/auth/` and must not be uploaded or shared.
+Saved login states and login-controller files must remain local under `output/auth/` and must not be uploaded or shared.
 
 ## Output
 
@@ -250,7 +318,7 @@ Only `strong_match` and `adjusted_match` enter the core competitor median. `weak
 ## Expected workflow
 
 1. Confirm dependencies are available.
-2. When authentication is required or preflight reports missing/invalid state, run the corresponding local `LOGIN.ps1 <Platform>` flow and complete login only in the Playwright Chromium window it opens.
+2. When authentication is required or preflight reports missing/invalid state, apply **Authentication execution routing**. For agent-driven use, execute `LOGIN.ps1 <Platform> -Start`, wait for the user to reply “已完成”, then execute `LOGIN.ps1 <Platform> -Complete`. Never substitute Cloud Browser.
 3. Run collection.
 4. Review `run_summary.json`.
 5. Review `products.xlsx` for product-table quality.
