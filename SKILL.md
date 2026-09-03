@@ -63,31 +63,33 @@ For these requests:
    .\LOGIN.ps1 <Platform> -Complete
    ```
 
-   Treat `LOGIN_AGENT_STATE=SAVED_AND_VERIFIED` as success.
+   Treat `LOGIN_AGENT_STATE=SAVED_AND_VERIFIED` as success only when it belongs to the same active session.
 7. If the local shell or local Skill filesystem is unavailable, **STOP**. Do not substitute Cloud Browser. Tell the user that collector authentication requires local execution and provide the exact `LOGIN.ps1` command instead.
-8. If the user is operating PowerShell manually rather than through an agent, the original interactive form remains valid:
+8. If the user is operating PowerShell manually rather than through an agent, the interactive form remains valid:
 
    ```powershell
    .\LOGIN.ps1 <Platform>
    ```
 
-9. `-Status` may be used to inspect an active two-stage session, and `-Cancel` may be used to discard an abandoned session without deleting previously saved auth state.
-10. If `-Start` returns success but no local Chromium window appears, or if `-Complete` reports that the detached local login process no longer exists, treat that as a **local execution/persistence failure**. Do not fall back to Cloud Browser. Offer `-Status`, restart with `-Start`, or use the manual interactive `LOGIN.ps1 <Platform>` flow.
+9. `-Status` may inspect an active two-stage session; `-Cancel` may discard an abandoned session without deleting previously saved auth state.
+10. If `-Start` returns success but no local Chromium window appears, or if `-Complete` reports that the active process identity/session no longer matches, treat that as a local execution/persistence failure. Do not fall back to Cloud Browser.
 
-The expected conversational protocol is therefore:
+Expected protocol:
 
 ```text
 user asks to record/refresh login state
         ↓
 local shell: LOGIN.ps1 <Platform> -Start
         ↓
-LOGIN_AGENT_STATE=WAITING_FOR_USER
+LOGIN_AGENT_STATE=WAITING_FOR_USER + session_id
         ↓
-assistant asks user to complete login in LOCAL Chromium and reply “已完成”
-        ↓
-user replies “已完成”
+user logs in in LOCAL Chromium and replies “已完成”
         ↓
 local shell: LOGIN.ps1 <Platform> -Complete
+        ↓
+session_id + PID/path/start-time validation
+        ↓
+post-save auth/business validation
         ↓
 LOGIN_AGENT_STATE=SAVED_AND_VERIFIED
 ```
@@ -100,17 +102,21 @@ From the project root:
 powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\INSTALL.ps1
 ```
 
-For first-time dependency installation:
+For a new machine or missing Playwright runtime:
 
 ```powershell
 powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\INSTALL.ps1 -InstallDependencies
 ```
 
-Manual Python dependencies:
+The installer is fail-fast: required source files are validated before copy and required installed files are validated again after copy. Missing `install_dependencies_windows.ps1`, `login_controller.py`, or other required files must fail installation rather than produce a partial Skill.
 
-```bash
-python -m pip install -r requirements.txt
-python -m playwright install chromium
+`LOGIN.ps1` does not blindly select the newest Python. It probes discovered Python interpreters and uses one that can import Playwright **and** has Playwright Chromium installed. Google Chrome is not required.
+
+Developer/test dependencies:
+
+```powershell
+python -m pip install -r requirements-dev.txt
+.\RUN_TESTS.ps1
 ```
 
 ## Baseline workflow
@@ -147,7 +153,14 @@ python run.py --quality-price-config path/to/config.json
 
 ## Login workflow
 
-`LOGIN.ps1` supports both manual PowerShell use and a two-stage agent flow. Both routes launch the existing `cloud_phone_monitor.login_wait_for_signal` helper in a **local headed Playwright Chromium** process.
+`LOGIN.ps1` is the Windows orchestration entrypoint. It launches `cloud_phone_monitor.login_controller`, which in turn launches the existing `cloud_phone_monitor.login_wait_for_signal` Playwright helper in a local headed Chromium process.
+
+The controller adds four guarantees around the existing helper:
+
+1. Every login attempt has a new `session_id`; stale historical `saved_and_verified` files cannot satisfy a new `-Complete`.
+2. Process management is guarded by PID **plus executable path plus process start time** before signal/kill operations.
+3. New storage state is first written to a session-specific `.pending.<session_id>` file and only atomically replaces the previous state after verification succeeds.
+4. VSPhone, Redfinger, and LDCloud require positive authentication evidence plus purchase/business-page evidence after reopening the pending storage state; merely navigating to a URL is not `SAVED_AND_VERIFIED`.
 
 Manual PowerShell login:
 
@@ -158,23 +171,17 @@ Manual PowerShell login:
 .\LOGIN.ps1 LDCloud
 ```
 
-Agent-controlled login is intentionally split across two invocations so the local browser can remain open while the user returns to chat:
+Agent-controlled login:
 
 ```powershell
-# Phase 1: start local Chromium and return control to the agent
 .\LOGIN.ps1 UgPhone -Start
-
-# Phase 2: after the user says “已完成” in chat
+# user logs in locally and replies “已完成”
 .\LOGIN.ps1 UgPhone -Complete
 ```
 
-The same `-Start` / `-Complete` pattern applies to VSPhone, Redfinger and LDCloud. `-Status` reports the current local login-session state; `-Cancel` terminates an abandoned local login session without deleting previously saved authentication files.
+The same pattern applies to the other platforms. `-Status` reports active-session integrity; `-Cancel` terminates only a process whose PID/path/start-time identity matches the stored session metadata.
 
-The two-stage controller stores only local orchestration metadata under `output/auth/<platform>_login_agent_session.json`; this file contains the helper process id and local paths, remains private, and is removed after completion/cancellation. The actual authentication artifacts continue to be written by the existing Python login helper.
-
-Do not complete collector authentication in ChatGPT Work / Cloud Browser. Its Cookie, localStorage and sessionStorage data are isolated from the local project and cannot become `output/auth/` state.
-
-UgPhone keeps the existing three-layer local authentication design:
+UgPhone keeps the three-layer local authentication design:
 
 ```text
 output/auth/ugphone_profile/                 # long-lived primary authentication authority
@@ -182,9 +189,11 @@ output/auth/ugphone_state.json               # Playwright-compatible storage sta
 output/auth/ugphone_runtime_context.json     # short-lived runtime bridge
 ```
 
-For UgPhone, the login helper verifies authenticated purchase-page business data and pricing API evidence before saving, then reopens the persistent profile in headed and scheduled-task-equivalent headless modes. The runtime snapshot is only a short-lived fill-missing bridge and must not override newer state already present in the persistent profile.
+For UgPhone, the existing helper continues to verify authenticated purchase-page business data and pricing API evidence, then reopens the persistent profile in headed and scheduled-task-equivalent headless modes. The controller commits the pending storage/runtime artifacts only after those helper checks succeed.
 
-VSPhone, Redfinger and LDCloud use the same local `LOGIN.ps1` controller and save platform-specific Playwright storage state. Their current platform-specific live-auth verification is less strict than UgPhone, so do not describe those three as having the same purchase/API-level proof unless their verifier is strengthened later.
+For VSPhone, Redfinger and LDCloud, the controller reopens the pending storage state headlessly and requires **server-acknowledged authentication evidence** together with platform purchase/business evidence. A token/cookie/storage key by itself is only a local credential hint and is not sufficient. Verification succeeds only when the page also exposes a strong authenticated UI marker (for example logout/sign-out), a user/account marker paired with credential evidence, or a successful user/profile/account API response containing non-empty identity fields. This is deliberately conservative: uncertainty fails closed rather than reporting a false `SAVED_AND_VERIFIED`.
+
+The scheduled login preflight uses the same stronger non-UgPhone saved-state verifier, rather than checking only whether a JSON file exists.
 
 `python run.py --headed` is a visible collection/debug mode, not the canonical first-login persistence workflow.
 

@@ -43,6 +43,8 @@ def test_public_deployment_contract_and_files() -> None:
     assert not (ROOT / "install_windows.ps1").exists()
     assert (ROOT / "install_dependencies_windows.ps1").is_file()
     assert (ROOT / "LOGIN.ps1").is_file()
+    assert (ROOT / "cloud_phone_monitor" / "login_controller.py").is_file()
+    assert (ROOT / "cloud_phone_monitor" / "auth_session_contract.py").is_file()
 
 
 def test_public_publisher_has_no_bound_remote() -> None:
@@ -56,24 +58,26 @@ def test_public_publisher_has_no_bound_remote() -> None:
         text = (ROOT / rel).read_text(encoding="utf-8")
         assert "github.com/YOUR_ACCOUNT/YOUR_DASHBOARD_REPO.git" in text or "https://github.com/" not in text
 
-    publisher = (ROOT / "deployment/windows/publish_dashboard.ps1").read_text(
-        encoding="utf-8"
-    )
+    publisher = (ROOT / "deployment/windows/publish_dashboard.ps1").read_text(encoding="utf-8")
     assert "publisher.local.json" in publisher
     assert "GitHub Pages publishing is not configured" in publisher
 
 
-def test_installer_is_user_install_only() -> None:
+def test_installer_and_login_controller_contract() -> None:
     installer = (ROOT / "INSTALL.ps1").read_text(encoding="utf-8")
     assert "PUBLISH_SOURCE_TO_GITHUB.ps1" not in installer
     assert "PATCH_NOTES" not in installer
     assert "release_contract.json" not in installer
     assert "test_v*.py" not in installer
     assert '"LOGIN.ps1"' in installer
+    assert "Validate source package completeness" in installer
+    assert "Validate installed Skill completeness" in installer
+    assert "cloud_phone_monitor\\login_controller.py" in installer
 
     login_script = (ROOT / "LOGIN.ps1").read_text(encoding="utf-8")
-    assert "cloud_phone_monitor.login_wait_for_signal" in login_script
-    assert "ChatGPT Work / Cloud Browser" in login_script
+    assert "cloud_phone_monitor.login_controller" in login_script
+    assert "Resolve-PlaywrightPython" in login_script
+    assert "Google Chrome is not required" in login_script
     assert "--persistent-profile" in login_script
     assert "ugphone_runtime_context.json" in login_script
     assert "[switch]$Start" in login_script
@@ -83,6 +87,17 @@ def test_installer_is_user_install_only() -> None:
     assert "LOGIN_AGENT_STATE=WAITING_FOR_USER" in login_script
     assert "LOGIN_AGENT_STATE=SAVED_AND_VERIFIED" in login_script
     assert "login_agent_session.json" in login_script
+    assert "process_start_ticks" in login_script
+    assert "Status/control session_id mismatch" in login_script
+
+    controller = (ROOT / "cloud_phone_monitor" / "login_controller.py").read_text(encoding="utf-8")
+    assert "cloud_phone_monitor.login_wait_for_signal" in controller
+    assert "verify_saved_auth_state" in controller
+    assert ".pending." in controller
+    assert "signal_matches_session" in controller
+    auth_contract = (ROOT / "cloud_phone_monitor" / "auth_session_contract.py").read_text(encoding="utf-8")
+    assert "no_server_acknowledged_auth_evidence" in auth_contract
+    assert "server_authenticated" in auth_contract
 
     skill_text = (ROOT / "SKILL.md").read_text(encoding="utf-8")
     assert "Authentication execution routing (hard rule)" in skill_text
@@ -90,9 +105,7 @@ def test_installer_is_user_install_only() -> None:
     assert "LOGIN.ps1 <Platform> -Complete" in skill_text
     assert "NEVER" in skill_text and "Cloud Browser" in skill_text
 
-    deployment_installer = (
-        ROOT / "deployment/windows/install_deployment.ps1"
-    ).read_text(encoding="utf-8")
+    deployment_installer = (ROOT / "deployment/windows/install_deployment.ps1").read_text(encoding="utf-8")
     assert "obsolete release-branded" not in deployment_installer
     assert "verify_v*" not in deployment_installer
     assert "Canonical deployment" not in deployment_installer
@@ -132,10 +145,7 @@ def test_validator_accepts_gzip_and_partial_coverage(tmp_path: Path) -> None:
     )
     _write_json(data / "collection_contract.json", {"status": "warning", "schema_version": 9})
     _write_json(data / "run_manifest.json", {"skill_release": "current", "schema_version": 9})
-    _write_json(
-        data / "history_storage.json",
-        {"codec": "gzip-json-v1", "price_trends_file": "price_trends.json.gz"},
-    )
+    _write_json(data / "history_storage.json", {"codec": "gzip-json-v1", "price_trends_file": "price_trends.json.gz"})
 
     trend = {"history_end_date": "2026-09-01", "trend_detail_files": [], "series": []}
     (data / "price_trends.json.gz").write_bytes(
