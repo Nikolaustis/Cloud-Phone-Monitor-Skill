@@ -44,6 +44,7 @@ $rootFiles = @(
     "INSTALL_GUIDE.md",
     "VALIDATION.md",
     "MANIFEST_SHA256.txt",
+    "LOGIN.ps1",
     "INSTALL.ps1"
 )
 foreach ($name in $rootFiles) {
@@ -74,5 +75,6 @@ if ($InstallDailyTask) {
 
 Write-Host ""
 Write-Host "Installation completed."
+Write-Host "Local login:    $SkillRoot\LOGIN.ps1 <UgPhone|VSPhone|Redfinger|LDCloud>"
 Write-Host "Daily updater:  $SitesRoot\update_cloud_phone_dashboard.ps1"
 Write-Host "GitHub Pages publishing is disabled unless publisher.local.json is configured."

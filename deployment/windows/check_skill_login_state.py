@@ -19,6 +19,10 @@ def nonempty_file(path: Path) -> bool:
         return False
 
 
+def login_command(skill_root: Path, platform: str) -> str:
+    return f'cd "{skill_root}" && powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\\LOGIN.ps1 {platform}'
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description="Validate local auth state before the scheduled Cloud Phone Monitor run.")
     parser.add_argument("--skill-root", required=True)
@@ -35,6 +39,8 @@ def main() -> int:
         "auth_dir": str(auth_dir),
         "platforms": {},
         "all_ok": False,
+        "login_entrypoint": str(skill_root / "LOGIN.ps1"),
+        "local_login_required": True,
     }
 
     state_files = {
@@ -48,8 +54,11 @@ def main() -> int:
             "ok": ok,
             "status": "ok" if ok else "missing_or_empty_storage_state",
             "state_file": str(path),
+            "repair_command": login_command(skill_root, platform),
         }
         print(f"[{ 'OK' if ok else 'FAIL' }] {platform}: {report['platforms'][platform]['status']}")
+        if not ok:
+            print(f"       Repair: .\\LOGIN.ps1 {platform}")
 
     ug_state = auth_dir / "ugphone_state.json"
     ug_profile = auth_dir / "ugphone_profile"
@@ -61,6 +70,7 @@ def main() -> int:
         "state_file": str(ug_state),
         "persistent_profile": str(ug_profile),
         "runtime_context": str(ug_runtime),
+        "repair_command": login_command(skill_root, "UgPhone"),
     }
 
     if ug_base_ok and not args.skip_live_ugphone:
@@ -89,12 +99,21 @@ def main() -> int:
 
     report["platforms"]["UgPhone"] = ug_result
     print(f"[{ 'OK' if ug_result['ok'] else 'FAIL' }] UgPhone: {ug_result['status']}")
+    if not ug_result["ok"]:
+        print("       Repair: .\\LOGIN.ps1 UgPhone")
 
     report["all_ok"] = all(bool(row.get("ok")) for row in report["platforms"].values())
     report_path.parent.mkdir(parents=True, exist_ok=True)
     report_path.write_text(json.dumps(report, ensure_ascii=False, indent=2, default=str), encoding="utf-8")
     print(f"Preflight report: {report_path}")
     print(f"all_ok = {report['all_ok']}")
+
+    if not report["all_ok"]:
+        print("")
+        print("Collector authentication must be repaired in the LOCAL Playwright Chromium browser.")
+        print("Do not use ChatGPT Work / Cloud Browser for collector login; that browser session is isolated from output/auth/.")
+        print(f'Run the repair command(s) from: {skill_root}')
+
     return 0 if report["all_ok"] else 2
 
 

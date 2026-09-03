@@ -45,6 +45,35 @@ function Write-SchedulerStatus([string]$Status, [string]$Message = "") {
     }
 }
 
+function Show-LoginRepairCommands([string]$ReportPath) {
+    Write-Host ""
+    Write-Host "Login state repair:"
+    Write-Host "Collector login must be completed in the LOCAL Chromium opened by LOGIN.ps1."
+    Write-Host "Do not use ChatGPT Work / Cloud Browser for collector authentication."
+    Write-Host ""
+    Write-Host "Set-Location `"$SkillRoot`""
+
+    $shown = $false
+    if (Test-Path $ReportPath) {
+        try {
+            $report = Get-Content -Raw -LiteralPath $ReportPath | ConvertFrom-Json
+            foreach ($property in $report.platforms.PSObject.Properties) {
+                if ($property.Value.ok -ne $true) {
+                    Write-Host ".\LOGIN.ps1 $($property.Name)"
+                    $shown = $true
+                }
+            }
+        } catch {}
+    }
+    if (-not $shown) {
+        Write-Host ".\LOGIN.ps1 UgPhone"
+        Write-Host ".\LOGIN.ps1 VSPhone"
+        Write-Host ".\LOGIN.ps1 Redfinger"
+        Write-Host ".\LOGIN.ps1 LDCloud"
+    }
+    Write-Host ""
+}
+
 $PythonExe = Resolve-PythonExe
 $SitesRoot = $PSScriptRoot
 $LogsDir = Join-Path $SkillRoot "logs"
@@ -69,6 +98,7 @@ try {
     foreach ($path in @(
         $SkillRoot,
         (Join-Path $SkillRoot "run.py"),
+        (Join-Path $SkillRoot "LOGIN.ps1"),
         (Join-Path $SkillRoot "rebuild_dashboard_history.py"),
         (Join-Path $SkillRoot "dashboard\package.json"),
         (Join-Path $SkillRoot "deployment_contract.json"),
@@ -89,9 +119,13 @@ try {
     if (-not $SkipLoginPreflight) {
         Write-Host "Step 1: Login preflight check"
         $Preflight = Join-Path $SitesRoot "check_skill_login_state.py"
+        $PreflightReport = Join-Path $SitesRoot "login_preflight_report.json"
         if (!(Test-Path $Preflight)) { throw "Login preflight script not found: $Preflight" }
-        & $PythonExe $Preflight --skill-root $SkillRoot --report (Join-Path $SitesRoot "login_preflight_report.json")
-        if ($LASTEXITCODE -ne 0) { throw "Login preflight failed with exit code $LASTEXITCODE" }
+        & $PythonExe $Preflight --skill-root $SkillRoot --report $PreflightReport
+        if ($LASTEXITCODE -ne 0) {
+            Show-LoginRepairCommands $PreflightReport
+            throw "Login preflight failed with exit code $LASTEXITCODE. Repair the failed platform login state with LOGIN.ps1, then rerun the updater."
+        }
     } else {
         Write-Host "Step 1: Login preflight skipped by explicit switch."
     }

@@ -6,9 +6,24 @@ Cloud Phone Baseline Price Monitor 在采集、历史重建和 Dashboard 生成�
 
 采集前应确认平台处于可访问状态。
 
+用于自动采集的登录必须来自 `LOGIN.ps1` 启动的本机 Playwright Chromium。ChatGPT Work / Cloud Browser 的会话不能作为本机采集器的认证来源。
+
+登录预检失败时，应在 Skill 根目录重新运行对应平台的本地登录入口：
+
+```powershell
+.\LOGIN.ps1 UgPhone
+.\LOGIN.ps1 VSPhone
+.\LOGIN.ps1 Redfinger
+.\LOGIN.ps1 LDCloud
+```
+
+UgPhone 的正常本地认证基线包括 `ugphone_state.json`、`ugphone_profile/`，并在可用时加载短期 `ugphone_runtime_context.json`。预检会进一步尝试以计划任务等价的 headless persistent profile 验证购买页。
+
 以下情况通常会被视为严重问题：
 
 - 登录状态失效
+- 本地登录状态缺失或为空
+- UgPhone persistent profile 无法在计划任务/headless 环境恢复
 - CAPTCHA / 验证码阻断
 - 401 / 403 等访问错误
 - 页面被反爬或区域限制完全阻断

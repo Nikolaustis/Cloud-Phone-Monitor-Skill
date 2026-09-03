@@ -37,6 +37,7 @@ REQUIRED = {
     ".gitattributes",
     "SKILL.md",
     "README.md",
+    "LOGIN.ps1",
     "run.py",
     "rebuild_dashboard_history.py",
     "deployment_contract.json",

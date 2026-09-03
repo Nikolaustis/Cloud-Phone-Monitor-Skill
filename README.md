@@ -47,11 +47,28 @@ powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\install_dependencies_w
 
 ## 登录
 
-部分平台需要登录后才能读取完整价格。
+用于自动采集的登录必须在 Skill 启动的**本机 Playwright Chromium** 中完成。ChatGPT Work / Cloud Browser 的浏览器会话与本机采集器隔离，不能作为 `output/auth/` 的登录状态来源。
 
-```bash
-python run.py --headed
+安装后在 Skill 根目录运行：
+
+```powershell
+.\LOGIN.ps1 UgPhone
+.\LOGIN.ps1 VSPhone
+.\LOGIN.ps1 Redfinger
+.\LOGIN.ps1 LDCloud
 ```
+
+流程会自动启动本机 Chromium。请在弹出的窗口中完成登录，保持窗口打开，然后回到 PowerShell 按 Enter。脚本会自动创建完成信号、验证并保存登录状态。
+
+UgPhone 会保存并验证三层本地认证材料：
+
+```text
+output/auth/ugphone_profile/                 # 长期主要登录态
+output/auth/ugphone_state.json               # Playwright storage state
+output/auth/ugphone_runtime_context.json     # 短期运行桥接
+```
+
+`python run.py --headed` 仍可用于可见模式调试采集，但不再作为正式的首次登录/保存入口。
 
 登录状态、Cookie、Token 和账号信息属于本地私有数据，不应上传或共享。
 

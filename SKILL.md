@@ -36,6 +36,7 @@ Use this skill when the user asks for:
    - `non_subscription`: auto-renew disabled
 9. Historical rows without `purchase_mode` are treated as subscription rows for backward compatibility.
 10. VSPhone collection may change only the pricing-page auto-renew filter, must keep quantity at 1, read duration-card prices, ignore the footer order total, restore auto-renew when appropriate, and never click the final create/order button.
+11. Authentication used by the local collector must originate from a local Playwright browser context. A ChatGPT Work / Cloud Browser session is isolated and must never be treated as a source for local collector cookies, storage state, persistent profiles, or runtime context.
 
 ## Installation
 
@@ -92,11 +93,32 @@ python run.py --quality-price-config path/to/config.json
 
 ## Login workflow
 
-When a platform requires login, use a visible browser or the dedicated login helper.
+The canonical login entry point is the local PowerShell wrapper:
 
-```bash
-python run.py --headed
+```powershell
+.\LOGIN.ps1 UgPhone
+.\LOGIN.ps1 VSPhone
+.\LOGIN.ps1 Redfinger
+.\LOGIN.ps1 LDCloud
 ```
+
+`LOGIN.ps1` launches the existing `cloud_phone_monitor.login_wait_for_signal` helper in a local headed Playwright Chromium process, waits until that browser is ready, asks the user to complete the login there, creates the local signal after Enter is pressed, then waits for the Python helper to validate and persist the state.
+
+Do not complete collector authentication in ChatGPT Work / Cloud Browser. Its Cookie, localStorage and sessionStorage data are isolated from the local project and cannot become `output/auth/` state.
+
+UgPhone keeps the existing three-layer local authentication design:
+
+```text
+output/auth/ugphone_profile/                 # long-lived primary authentication authority
+output/auth/ugphone_state.json               # Playwright-compatible storage state
+output/auth/ugphone_runtime_context.json     # short-lived runtime bridge
+```
+
+For UgPhone, the login helper verifies authenticated purchase-page business data and pricing API evidence before saving, then reopens the persistent profile in headed and scheduled-task-equivalent headless modes. The runtime snapshot is only a short-lived fill-missing bridge and must not override newer state already present in the persistent profile.
+
+VSPhone, Redfinger and LDCloud use the same `LOGIN.ps1` user entry point and save platform-specific Playwright storage state. Their current platform-specific live-auth verification is less strict than UgPhone, so do not describe those three as having the same purchase/API-level proof unless their verifier is strengthened later.
+
+`python run.py --headed` is a visible collection/debug mode, not the canonical first-login persistence workflow.
 
 Saved login states must remain local under `output/auth/` and must not be uploaded or shared.
 
@@ -228,7 +250,7 @@ Only `strong_match` and `adjusted_match` enter the core competitor median. `weak
 ## Expected workflow
 
 1. Confirm dependencies are available.
-2. Complete headed/login flow when required.
+2. When authentication is required or preflight reports missing/invalid state, run the corresponding local `LOGIN.ps1 <Platform>` flow and complete login only in the Playwright Chromium window it opens.
 3. Run collection.
 4. Review `run_summary.json`.
 5. Review `products.xlsx` for product-table quality.

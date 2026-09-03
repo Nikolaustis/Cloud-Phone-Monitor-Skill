@@ -42,6 +42,7 @@ def test_public_deployment_contract_and_files() -> None:
     assert not (ROOT / "PUBLISH_SOURCE_TO_GITHUB.ps1").exists()
     assert not (ROOT / "install_windows.ps1").exists()
     assert (ROOT / "install_dependencies_windows.ps1").is_file()
+    assert (ROOT / "LOGIN.ps1").is_file()
 
 
 def test_public_publisher_has_no_bound_remote() -> None:
@@ -68,6 +69,13 @@ def test_installer_is_user_install_only() -> None:
     assert "PATCH_NOTES" not in installer
     assert "release_contract.json" not in installer
     assert "test_v*.py" not in installer
+    assert '"LOGIN.ps1"' in installer
+
+    login_script = (ROOT / "LOGIN.ps1").read_text(encoding="utf-8")
+    assert "cloud_phone_monitor.login_wait_for_signal" in login_script
+    assert "ChatGPT Work / Cloud Browser" in login_script
+    assert "--persistent-profile" in login_script
+    assert "ugphone_runtime_context.json" in login_script
 
     deployment_installer = (
         ROOT / "deployment/windows/install_deployment.ps1"
