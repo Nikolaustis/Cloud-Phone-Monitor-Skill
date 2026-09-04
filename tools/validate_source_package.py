@@ -94,11 +94,57 @@ def validate(root: Path, *, allow_local_runtime: bool = False, require_exact_pub
             "profile_lock.py",
         )
 
+    ai_context = root / "cloud_phone_monitor" / "ai_context.py"
+    if ai_context.is_file():
+        _require_markers(
+            problems,
+            ai_context,
+            ("ai-context-v2", "fact_id", "pairing_index.json", "trend_index.json"),
+            "ai_context.py",
+        )
+
+    ai_tools = root / "ai_backend" / "tools.py"
+    if ai_tools.is_file():
+        _require_markers(
+            problems,
+            ai_tools,
+            ("get_market_overview", "compare_configuration", "get_pairing_evidence", "simulate_price"),
+            "ai_backend/tools.py",
+        )
+
+    ai_frontend = root / "dashboard" / "src" / "components" / "AICopilot.jsx"
+    if ai_frontend.is_file():
+        _require_markers(
+            problems,
+            ai_frontend,
+            ("市场简报", "ConfigurationSelector", "What-if", "查看依据"),
+            "AICopilot.jsx",
+        )
+
+    demo_preparer = root / "tools" / "prepare_demo_runtime.py"
+    if demo_preparer.is_file():
+        _require_markers(
+            problems,
+            demo_preparer,
+            ("validate_output_root", "_safe_rmtree", "verification_demo_runtime", "Unsafe demo output path"),
+            "prepare_demo_runtime.py",
+        )
+
+    tracked_validator = root / "tools" / "validate_git_tracked_files.py"
+    if tracked_validator.is_file():
+        _require_markers(
+            problems,
+            tracked_validator,
+            ("git", "ls-files", "is_public_source_path", "SECRET_PATTERNS"),
+            "validate_git_tracked_files.py",
+        )
+
     for current, dirs, files in os.walk(root):
         cur = Path(current)
         rel_dir = cur.relative_to(root)
         rel_parts = set(rel_dir.parts)
-        if rel_parts & FORBIDDEN_DIR_NAMES:
+        is_demo_dashboard_data = len(rel_dir.parts) >= 2 and rel_dir.parts[0] == "demo" and rel_dir.parts[1] == "dashboard_data"
+        if rel_parts & FORBIDDEN_DIR_NAMES and not is_demo_dashboard_data:
             if not allow_local_runtime:
                 problems.append(f"forbidden directory included: {rel_dir}")
             dirs[:] = []
@@ -106,9 +152,11 @@ def validate(root: Path, *, allow_local_runtime: bool = False, require_exact_pub
 
         kept_dirs = []
         for directory in dirs:
-            if directory in FORBIDDEN_DIR_NAMES:
+            child_rel = (cur / directory).relative_to(root)
+            child_is_demo_dashboard_data = len(child_rel.parts) >= 2 and child_rel.parts[0] == "demo" and child_rel.parts[1] == "dashboard_data"
+            if directory in FORBIDDEN_DIR_NAMES and not child_is_demo_dashboard_data:
                 if not allow_local_runtime:
-                    problems.append(f"forbidden directory included: {(cur / directory).relative_to(root)}")
+                    problems.append(f"forbidden directory included: {child_rel}")
             else:
                 kept_dirs.append(directory)
         dirs[:] = kept_dirs

@@ -107,7 +107,8 @@ def test_installer_and_login_controller_contract() -> None:
     assert "cloud_phone_monitor.login_helper_session_entry" in controller
     assert '"--session-id"' in controller
     assert "verify_saved_auth_state" in controller
-    assert ".pending." in controller
+    assert "pending_path(" in controller
+    assert "commit_auth_artifacts" in controller
     assert "signal_matches_session" in controller
     assert "commit_auth_artifacts" in controller
     assert "timeout=450.0" in controller
