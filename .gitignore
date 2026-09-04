@@ -3,6 +3,7 @@ output/
 baselines/
 logs/
 .env
+ai.env
 *.log
 *.xlsx
 *.xls
@@ -43,3 +44,7 @@ Thumbs.db
 # Local deployment clones/backups
 *.bak_*
 backup_before_deployment_*/
+
+# Local migration/private backups
+private_backups/
+*.private-backup.zip
