@@ -51,6 +51,57 @@ try {
     & $PythonExe -B (Join-Path $StageRoot "tools\validate_source_package.py") $StageRoot --exact-public-tree
     if ($LASTEXITCODE -ne 0) { throw "Staged source package validation failed." }
 
+    Write-Host "Step 3.5: Run public staging self-test"
+
+$StageWindowsSmoke = Join-Path $StageRoot "tests\auth_state_machine\windows_login_smoke.ps1"
+if (!(Test-Path -LiteralPath $StageWindowsSmoke)) {
+    throw "Public staging Windows smoke test missing: $StageWindowsSmoke"
+}
+
+& powershell.exe `
+    -NoProfile `
+    -ExecutionPolicy Bypass `
+    -File $StageWindowsSmoke
+
+if ($LASTEXITCODE -ne 0) {
+    throw "Public staging Windows smoke tests failed."
+}
+
+$StageTests = Join-Path $StageRoot "tests"
+if (!(Test-Path -LiteralPath $StageTests)) {
+    throw "Public staging tests directory missing: $StageTests"
+}
+
+Push-Location $StageRoot
+try {
+    & $PythonExe -B -m pytest -q -p no:cacheprovider $StageTests
+
+    if ($LASTEXITCODE -ne 0) {
+        throw "Public staging pytest failed with exit code $LASTEXITCODE"
+    }
+}
+finally {
+    Pop-Location
+}
+
+
+$StagePytestCache = Join-Path $StageRoot ".pytest_cache"
+if (Test-Path -LiteralPath $StagePytestCache) {
+    Remove-Item -LiteralPath $StagePytestCache -Recurse -Force
+}
+
+Write-Host "Public staging self-test passed."
+
+Write-Host "Step 3.75: Revalidate public staging after self-test"
+& $PythonExe -B `
+    (Join-Path $StageRoot "tools\validate_source_package.py") `
+    $StageRoot `
+    --exact-public-tree
+
+if ($LASTEXITCODE -ne 0) {
+    throw "Public staging was mutated by self-test."
+}
+
     Write-Host "Step 4: Generate deterministic Manifest inside staging"
     & $PythonExe -B (Join-Path $StageRoot "tools\generate_manifest.py") $StageRoot
     if ($LASTEXITCODE -ne 0) { throw "Manifest generation failed." }
