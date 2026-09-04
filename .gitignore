@@ -9,6 +9,11 @@ logs/
 *.csv
 *.jsonl
 *_state.json
+*.pending.*
+*_login_status.json
+*_login_agent_session.json
+*_runtime_context.json
+*_profile/
 publisher.local.json
 
 # Python
@@ -17,6 +22,12 @@ __pycache__/
 .pytest_cache/
 .venv/
 venv/
+
+# Release staging/generated package
+.release_staging/
+release_staging/
+*.release.zip
+*.public-release.zip
 
 # Dashboard generated/dependencies
 dashboard/node_modules/
