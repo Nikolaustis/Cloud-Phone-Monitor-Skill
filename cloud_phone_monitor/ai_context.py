@@ -327,7 +327,12 @@ def build_ai_context(data_dir: Path, output_dir: Path | None = None) -> AIContex
         candidate_rows.extend(_rows(overview.get("attention_items", [])))
     candidate_rows.extend(_rows(pairing_raw))
     configs = _dedupe_configs([normalize_config_row(row) for row in candidate_rows])
-    configs = [row for row in configs if row.get("config_id") or row.get("label")]
+    configs = [
+    row
+    for row in configs
+    if row.get("config_id")
+    and _number(row.get("duration_days")) not in (None, 0)
+]
 
     # Fail closed if the AI selector index ever drops a configuration-duration
     # pair that exists in the canonical Dashboard duration inventory.  This is
