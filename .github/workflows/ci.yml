@@ -1,0 +1,241 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: cloud-phone-monitor-ci-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  PYTHONDONTWRITEBYTECODE: "1"
+
+jobs:
+  public-release-contract:
+    name: Public release contract
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - name: Install test + AI dependencies
+        run: |
+          python -B -m pip install -r requirements-dev.txt -c constraints-runtime.txt
+          python -B -m pip install -r requirements-ai.txt
+
+      - name: Install Playwright Chromium
+        run: python -B -m playwright install --with-deps chromium
+
+      - name: Chromium launch probe
+        run: python -B -c "from playwright.sync_api import sync_playwright; p=sync_playwright().start(); b=p.chromium.launch(headless=True); b.close(); p.stop(); print('Chromium probe OK')"
+
+      - name: Python behavior tests
+        run: python -B -m pytest -q tests
+
+      - name: Rebuild and verify isolated synthetic demo contract
+        shell: bash
+        run: |
+          set -euo pipefail
+          DEMO="${RUNNER_TEMP}/pricing-intelligence-demo"
+          python -B tools/prepare_demo_runtime.py . "$DEMO"
+          python -B tools/verify_demo_contract.py --context-dir "$DEMO/dashboard/public/dashboard_data/ai"
+
+      - name: Reject forbidden or secret Git-tracked files
+        run: python -B tools/validate_git_tracked_files.py .
+
+      - name: Validate developer working tree policy
+        run: python -B tools/validate_source_package.py . --working-tree
+
+      - name: Rebuild and validate canonical public staging
+        shell: bash
+        run: |
+          set -euo pipefail
+          STAGE="${RUNNER_TEMP}/cloud-phone-public-stage"
+          python -B tools/build_release_staging.py . "$STAGE"
+          python -B "$STAGE/tools/validate_source_package.py" "$STAGE" --exact-public-tree
+          if find "$STAGE" -type d -name __pycache__ -print -quit | grep -q .; then
+            echo "release validation polluted staging with __pycache__" >&2
+            exit 1
+          fi
+          python -B "$STAGE/tools/generate_manifest.py" "$STAGE"
+          python -B "$STAGE/tools/validate_manifest.py" "$STAGE"
+          python -B tools/validate_public_release.py . --manifest "$STAGE/MANIFEST_SHA256.txt"
+          cmp MANIFEST_SHA256.txt "$STAGE/MANIFEST_SHA256.txt"
+
+      - name: Build canonical release ZIP from clean staging
+        shell: bash
+        run: |
+          set -euo pipefail
+          STAGE="${RUNNER_TEMP}/cloud-phone-public-stage"
+          ZIP="${RUNNER_TEMP}/cloud-phone-monitor.public-release.zip"
+          python -B "$STAGE/tools/build_release_zip.py" "$STAGE" "$ZIP"
+          test -s "$ZIP"
+
+  ai-contract:
+    name: AI semantic + API contract
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - name: Install AI/test dependencies
+        run: |
+          python -B -m pip install -r requirements-dev.txt -c constraints-runtime.txt
+          python -B -m pip install -r requirements-ai.txt
+
+      - name: AI behavior tests
+        run: python -B -m pytest -q tests/ai
+
+      - name: Rebuild synthetic AI semantic context
+        run: |
+          rm -rf "${RUNNER_TEMP}/ai-context"
+          python -B build_ai_context.py --data-dir demo/dashboard_data --output-dir "${RUNNER_TEMP}/ai-context"
+          test -s "${RUNNER_TEMP}/ai-context/manifest.json"
+          python -B -c 'import json, os; p=os.environ["RUNNER_TEMP"]+"/ai-context/manifest.json"; v=json.load(open(p, encoding="utf-8")); assert v["schema_version"] == "ai-context-v2"; print(v["schema_version"])'
+
+      - name: Deterministic AI benchmark
+        run: python -B evals/run_eval.py
+
+      - name: Full synthetic demo semantic/API contract
+        shell: bash
+        run: |
+          set -euo pipefail
+          DEMO="${RUNNER_TEMP}/ai-full-demo"
+          python -B tools/prepare_demo_runtime.py . "$DEMO"
+          python -B tools/verify_demo_contract.py --context-dir "$DEMO/dashboard/public/dashboard_data/ai"
+
+      - name: FastAPI import contract
+        run: python -B -c "from ai_backend.app import app; assert app.version == '2.0.0-beta.1'; print(app.title, app.version)"
+
+      - name: Reject frontend provider secrets
+        shell: bash
+        run: |
+          set -euo pipefail
+          if grep -R -n -E 'AI_LLM_API_KEY|OPENAI_API_KEY|sk-[A-Za-z0-9]' dashboard/src dashboard/.env.example; then
+            echo "backend/provider credential marker found in frontend source" >&2
+            exit 1
+          fi
+
+
+  python-compatibility:
+    name: Python compatibility (${{ matrix.python-version }})
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.12", "3.13", "3.14"]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+          cache: pip
+      - name: Install pinned runtime, dev and AI dependencies
+        run: |
+          python -B -m pip install -r requirements-dev.txt -c constraints-runtime.txt
+          python -B -m pip install -r requirements-ai.txt
+      - name: Run Python test suite
+        run: python -B -m pytest -q tests
+      - name: Run deterministic AI benchmark
+        run: python -B evals/run_eval.py
+
+  windows-playwright-contract:
+    name: Windows runtime contract (${{ matrix.label }})
+    runs-on: windows-latest
+    timeout-minutes: 40
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - label: baseline-py312-node22
+            python-version: "3.12"
+            node-version: "22"
+          - label: compat-py314-node24
+            python-version: "3.14"
+            node-version: "24"
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ matrix.node-version }}
+          cache: npm
+          cache-dependency-path: dashboard/package-lock.json
+
+      - name: Build dedicated runtime and launch-test Chromium
+        shell: powershell
+        run: |
+          powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\install_dependencies_windows.ps1 -InstallDevDependencies -RecreateVenv -PythonVersion "${{ matrix.python-version }}"
+          powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\install_ai_dependencies_windows.ps1
+
+      - name: Run v2 runtime/demo verifier
+        shell: powershell
+        run: |
+          powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\VERIFY_V2.ps1 -SkipRelease
+
+      - name: Verify API launch from a Skill path containing spaces
+        shell: powershell
+        run: |
+          $spacePath = Join-Path $env:RUNNER_TEMP "Cloud Phone Pricing Skill"
+          if (Test-Path -LiteralPath $spacePath) { Remove-Item -LiteralPath $spacePath -Force -Recurse }
+          New-Item -ItemType Junction -Path $spacePath -Target $env:GITHUB_WORKSPACE | Out-Null
+          $verifyScript = Join-Path $spacePath "VERIFY_V2.ps1"
+          & powershell.exe -NoProfile -ExecutionPolicy Bypass -File $verifyScript -SkillRoot $spacePath -SkipRelease -SkipDashboardBuild
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+      - name: Verify login controller status entrypoint
+        shell: powershell
+        run: |
+          powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\LOGIN.ps1 UgPhone -Status
+
+  dashboard-build:
+    name: Dashboard build (Node ${{ matrix.node-version }})
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        node-version: ["22", "24"]
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ matrix.node-version }}
+          cache: npm
+          cache-dependency-path: dashboard/package-lock.json
+
+      - name: Install dashboard dependencies
+        working-directory: dashboard
+        run: npm ci
+
+      - name: Build dashboard
+        working-directory: dashboard
+        run: npm run build
