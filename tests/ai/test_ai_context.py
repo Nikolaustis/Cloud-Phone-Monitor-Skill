@@ -118,3 +118,81 @@ def test_duration_comparison_is_canonical_selector_inventory(tmp_path: Path) -> 
     verifier = Path(__file__).resolve().parents[2] / "tools" / "verify_ai_selector_inventory.py"
     completed = subprocess.run([sys.executable, str(verifier), "--data-dir", str(data)], capture_output=True, text=True, check=False)
     assert completed.returncode == 0, completed.stdout + completed.stderr
+
+
+def test_config_index_excludes_rows_without_purchase_period(tmp_path: Path) -> None:
+    data = tmp_path / "dashboard_data"
+
+    _write(
+        data / "meta.json",
+        {
+            "last_run_date": "2026-09-04",
+            "current_price_data_revision": "no-blank-duration",
+            "safe_data_only": True,
+        },
+    )
+
+    _write(
+        data / "frontend_price_overview.json",
+        {
+            "rows_compared": 1,
+            "market_position_counts": {},
+            "attention_items": [],
+        },
+    )
+
+    _write(
+        data / "duration_price_comparison.json",
+        {
+            "core_buckets": [30],
+            "buckets": {
+                "30": [
+                    {
+                        "ug_config_id": "kvip-a10",
+                        "ug_config": "KVIP / Android 10 / 6 cores / 5.3GB / 64GB",
+                        "ug_product_model": "KVIP",
+                        "ug_android_version": "10",
+                        "ug_cpu": "6 cores",
+                        "ug_ram": "5.3GB",
+                        "ug_storage": "64GB",
+                        "duration_days": 30,
+                        "ugphone_price": 16.99,
+                    }
+                ]
+            },
+            "other_rows": [],
+        },
+    )
+
+    # This analysis row deliberately has no purchase period.
+    # It may remain useful to other analysis layers, but it must never become
+    # a selectable Explain / What-if configuration.
+    _write(
+        data / "pairing_matrix.json",
+        [
+            {
+                "ug_config_id": "orphan-without-duration",
+                "ug_config": "KVIP analysis-only row",
+                "ug_product_model": "KVIP",
+                "ugphone_price": 10,
+                "competitor_median_price": 9,
+            }
+        ],
+    )
+
+    _write(data / "price_change_tracking.json", [])
+    _write(data / "metric_definitions.json", [])
+
+    result = build_ai_context(data)
+
+    configs = json.loads(
+        (result.output_dir / "config_index.json").read_text(encoding="utf-8")
+    )
+
+    assert len(configs) == 1
+    assert configs[0]["config_id"] == "kvip-a10"
+    assert configs[0]["duration_days"] == 30
+    assert all(
+        row.get("duration_days") not in (None, "", 0)
+        for row in configs
+    )

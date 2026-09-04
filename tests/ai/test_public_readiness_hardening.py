@@ -91,7 +91,12 @@ def test_ai_env_file_is_loaded_without_overriding_process_env(tmp_path: Path, mo
     )
     monkeypatch.setenv("AI_ENV_FILE", str(env_file))
     monkeypatch.setenv("AI_LLM_PROVIDER", "process-provider")
-    for name in ("AI_ENABLE_LLM", "AI_LLM_MODEL", "AI_RATE_LIMIT_PER_MINUTE"):
+    for name in (
+        "AI_ENABLE_LLM",
+        "AI_LLM_MODEL",
+        "AI_RATE_LIMIT_PER_MINUTE",
+        "AI_PORT",
+    ):
         monkeypatch.delenv(name, raising=False)
 
     settings = Settings.from_env()
@@ -100,7 +105,6 @@ def test_ai_env_file_is_loaded_without_overriding_process_env(tmp_path: Path, mo
     assert settings.llm_model == "file-model"
     assert settings.max_requests_per_minute == 17
     assert settings.port == 19090
-
 
 def test_service_health_and_launch_scripts_bind_identity_and_revision() -> None:
     app = (ROOT / "ai_backend" / "app.py").read_text(encoding="utf-8")

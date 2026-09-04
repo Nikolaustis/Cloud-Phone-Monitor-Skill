@@ -4,6 +4,8 @@ import ast
 import importlib.util
 from pathlib import Path
 
+import pytest
+
 
 ROOT = Path(__file__).resolve().parents[1]
 LOGIN_HELPER = ROOT / "cloud_phone_monitor" / "login_wait_for_signal.py"
@@ -42,6 +44,12 @@ def test_missing_business_evidence_still_fails():
 
 
 def test_external_patcher_is_idempotent(tmp_path: Path):
+    if not PATCHER.is_file():
+        pytest.skip(
+            "External UgPhone migration patcher is intentionally excluded "
+            "from the public release."
+        )
+
     spec = importlib.util.spec_from_file_location("ug_patch", PATCHER)
     module = importlib.util.module_from_spec(spec)
     assert spec.loader is not None

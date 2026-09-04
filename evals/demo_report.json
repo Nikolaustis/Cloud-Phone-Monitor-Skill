@@ -5,8 +5,8 @@
   "evidence_coverage": 1.0,
   "abstention_accuracy": 1.0,
   "numeric_accuracy": 1.0,
-  "p50_latency_ms": 0.024,
-  "p95_latency_ms": 0.218,
+  "p50_latency_ms": 0.039,
+  "p95_latency_ms": 0.29,
   "rows": [
     {
       "id": "market-1",
@@ -14,7 +14,7 @@
       "evidence_ok": true,
       "abstention_ok": true,
       "numeric_ok": true,
-      "latency_ms": 0.433,
+      "latency_ms": 0.566,
       "intent": "get_market_overview",
       "evidence_count": 2,
       "tool_calls": [
@@ -27,7 +27,7 @@
       "evidence_ok": true,
       "abstention_ok": true,
       "numeric_ok": true,
-      "latency_ms": 0.026,
+      "latency_ms": 0.043,
       "intent": "get_market_overview",
       "evidence_count": 2,
       "tool_calls": [
@@ -40,7 +40,7 @@
       "evidence_ok": true,
       "abstention_ok": true,
       "numeric_ok": true,
-      "latency_ms": 0.014,
+      "latency_ms": 0.039,
       "intent": "get_market_overview",
       "evidence_count": 2,
       "tool_calls": [
@@ -53,7 +53,7 @@
       "evidence_ok": true,
       "abstention_ok": true,
       "numeric_ok": true,
-      "latency_ms": 0.151,
+      "latency_ms": 0.29,
       "intent": "search_configs",
       "evidence_count": 1,
       "tool_calls": [
@@ -66,7 +66,7 @@
       "evidence_ok": true,
       "abstention_ok": true,
       "numeric_ok": true,
-      "latency_ms": 0.027,
+      "latency_ms": 0.041,
       "intent": "search_configs",
       "evidence_count": 1,
       "tool_calls": [
@@ -79,7 +79,7 @@
       "evidence_ok": true,
       "abstention_ok": true,
       "numeric_ok": true,
-      "latency_ms": 0.018,
+      "latency_ms": 0.025,
       "intent": "search_configs",
       "evidence_count": 1,
       "tool_calls": [
@@ -92,7 +92,7 @@
       "evidence_ok": true,
       "abstention_ok": true,
       "numeric_ok": true,
-      "latency_ms": 0.018,
+      "latency_ms": 0.025,
       "intent": "search_configs",
       "evidence_count": 1,
       "tool_calls": [
@@ -105,7 +105,7 @@
       "evidence_ok": true,
       "abstention_ok": true,
       "numeric_ok": true,
-      "latency_ms": 0.15,
+      "latency_ms": 0.175,
       "intent": "get_price_changes",
       "evidence_count": 2,
       "tool_calls": [
@@ -118,7 +118,7 @@
       "evidence_ok": true,
       "abstention_ok": true,
       "numeric_ok": true,
-      "latency_ms": 0.022,
+      "latency_ms": 0.029,
       "intent": "get_price_changes",
       "evidence_count": 1,
       "tool_calls": [
@@ -131,7 +131,7 @@
       "evidence_ok": true,
       "abstention_ok": true,
       "numeric_ok": true,
-      "latency_ms": 0.022,
+      "latency_ms": 0.03,
       "intent": "get_price_changes",
       "evidence_count": 3,
       "tool_calls": [
@@ -144,7 +144,7 @@
       "evidence_ok": true,
       "abstention_ok": true,
       "numeric_ok": true,
-      "latency_ms": 0.218,
+      "latency_ms": 0.213,
       "intent": "get_metric_definition",
       "evidence_count": 1,
       "tool_calls": [
@@ -157,7 +157,7 @@
       "evidence_ok": true,
       "abstention_ok": true,
       "numeric_ok": true,
-      "latency_ms": 0.021,
+      "latency_ms": 0.029,
       "intent": "get_metric_definition",
       "evidence_count": 1,
       "tool_calls": [
@@ -170,7 +170,7 @@
       "evidence_ok": true,
       "abstention_ok": true,
       "numeric_ok": true,
-      "latency_ms": 0.016,
+      "latency_ms": 0.022,
       "intent": "get_metric_definition",
       "evidence_count": 1,
       "tool_calls": [
@@ -183,7 +183,7 @@
       "evidence_ok": true,
       "abstention_ok": true,
       "numeric_ok": true,
-      "latency_ms": 0.179,
+      "latency_ms": 0.22,
       "intent": "explain_configuration",
       "evidence_count": 6,
       "tool_calls": [
@@ -198,7 +198,7 @@
       "evidence_ok": true,
       "abstention_ok": true,
       "numeric_ok": true,
-      "latency_ms": 0.05,
+      "latency_ms": 0.057,
       "intent": "explain_configuration",
       "evidence_count": 6,
       "tool_calls": [
@@ -213,7 +213,7 @@
       "evidence_ok": true,
       "abstention_ok": true,
       "numeric_ok": true,
-      "latency_ms": 0.048,
+      "latency_ms": 0.043,
       "intent": "explain_configuration",
       "evidence_count": 6,
       "tool_calls": [
@@ -228,7 +228,7 @@
       "evidence_ok": true,
       "abstention_ok": true,
       "numeric_ok": true,
-      "latency_ms": 0.131,
+      "latency_ms": 0.151,
       "intent": "get_price_history",
       "evidence_count": 1,
       "tool_calls": [
@@ -242,7 +242,7 @@
       "evidence_ok": true,
       "abstention_ok": true,
       "numeric_ok": true,
-      "latency_ms": 0.024,
+      "latency_ms": 0.033,
       "intent": "get_price_history",
       "evidence_count": 1,
       "tool_calls": [
@@ -256,7 +256,7 @@
       "evidence_ok": true,
       "abstention_ok": true,
       "numeric_ok": true,
-      "latency_ms": 0.011,
+      "latency_ms": 0.015,
       "intent": "abstain",
       "evidence_count": 0,
       "tool_calls": [
@@ -269,7 +269,7 @@
       "evidence_ok": true,
       "abstention_ok": true,
       "numeric_ok": true,
-      "latency_ms": 0.01,
+      "latency_ms": 0.014,
       "intent": "abstain",
       "evidence_count": 0,
       "tool_calls": [
@@ -282,7 +282,7 @@
       "evidence_ok": true,
       "abstention_ok": true,
       "numeric_ok": true,
-      "latency_ms": 0.009,
+      "latency_ms": 0.012,
       "intent": "abstain",
       "evidence_count": 0,
       "tool_calls": [
