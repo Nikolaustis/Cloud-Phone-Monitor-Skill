@@ -1,0 +1,6 @@
+{
+  "series": [
+    {"config_id":"demo_kvip_30d","platform":"UgPhone","product_model":"KVIP","duration_days":30,"points":[{"date":"2026-08-30","price":12.0},{"date":"2026-08-31","price":12.0},{"date":"2026-09-01","price":13.0},{"date":"2026-09-02","price":14.0},{"date":"2026-09-03","price":15.0}]},
+    {"config_id":"demo_gvip_30d","platform":"UgPhone","product_model":"GVIP","duration_days":30,"points":[{"date":"2026-08-30","price":10.5},{"date":"2026-09-03","price":11.0}]}
+  ]
+}

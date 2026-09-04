@@ -1,0 +1,5 @@
+[
+  {"platform":"UgPhone","config_id":"demo_kvip_30d","product_model":"KVIP","duration_days":30,"current_price":15.0,"previous_price":12.0,"price_change_pct":0.25,"reason_code":"price_up","alert_level":"warning","price_source":"current_observed","observed_at":"2026-09-03"},
+  {"platform":"VSPhone","config_id":"demo_vs_30d","product_model":"High-end","duration_days":30,"current_price":9.0,"previous_price":10.0,"price_change_pct":-0.10,"reason_code":"price_down","alert_level":"info","price_source":"current_observed","observed_at":"2026-09-03"},
+  {"platform":"UgPhone","config_id":"demo_gvip_30d","product_model":"GVIP","duration_days":30,"current_price":11.0,"previous_price":10.5,"price_change_pct":0.047619,"reason_code":"price_up","alert_level":"info","price_source":"current_observed","observed_at":"2026-09-03"}
+]

@@ -1,18 +1,8 @@
 param(
     [string]$SkillRoot = (Join-Path $env:USERPROFILE ".codex\skills\cloud-phone-monitor-skill"),
-    [string]$PublisherConfigPath = ""
+    [string]$SiteRepo = "C:\Sites\Cloud-Phone-Dashboard-Site"
 )
 $ErrorActionPreference = "Stop"
-
-if ([string]::IsNullOrWhiteSpace($PublisherConfigPath)) {
-    $PublisherConfigPath = Join-Path $SkillRoot "publisher.local.json"
-}
-
-& (Join-Path $PSScriptRoot "publish_dashboard.ps1") `
-    -SkillRoot $SkillRoot `
-    -ConfigPath $PublisherConfigPath `
-    -CommitPrefix "Resume publish dashboard"
-
-if ($LASTEXITCODE -ne 0) {
-    throw "Resume publish failed with exit code $LASTEXITCODE"
-}
+#_RESUME_PUBLISH
+& "C:\Sites\publish_dashboard.ps1" -SkillRoot $SkillRoot -SiteRepo $SiteRepo -CommitPrefix "Resume publish dashboard"
+if ($LASTEXITCODE -ne 0) { throw "resume publish failed with exit code $LASTEXITCODE" }

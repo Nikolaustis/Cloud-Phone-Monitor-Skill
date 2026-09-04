@@ -1,0 +1,23 @@
+[
+  {
+    "name_zh": "UgPhone 相对竞品指数",
+    "field": "ugphone_relative_index",
+    "meaning": "UgPhone 当前价相对核心竞品中位价的指数。",
+    "calculation": "UgPhone 当前价 / 核心竞品中位价 × 100。",
+    "fact_id": "metric_7d31c90a354eb69410"
+  },
+  {
+    "name_zh": "配置相似度",
+    "field": "config_similarity_score",
+    "meaning": "UgPhone 配置与竞品配置的相似度分数。",
+    "calculation": "综合 Android、CPU、内存、存储、地区和购买天数。",
+    "fact_id": "metric_ee188bbf2c14ffc608"
+  },
+  {
+    "name_zh": "可比等级",
+    "field": "comparability_level",
+    "meaning": "决定竞品是否进入核心价格中位数。",
+    "calculation": "strong_match 和 adjusted_match 进入核心中位数；weak_match 仅作为上下文。",
+    "fact_id": "metric_c16d42419faeb94c86"
+  }
+]

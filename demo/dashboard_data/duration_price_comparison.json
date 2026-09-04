@@ -1,0 +1,23 @@
+{
+  "core_buckets": [1, 3, 7, 30, 60, 90, 180, 365],
+  "buckets": {
+    "30": [
+      {
+        "platform": "UgPhone",
+        "product_model": "KVIP",
+        "duration_days": 30,
+        "current_price": 15.0,
+        "price_source": "current_observed"
+      },
+      {
+        "platform": "VSPhone",
+        "product_model": "High-end",
+        "duration_days": 30,
+        "current_price": 12.0,
+        "price_source": "current_observed"
+      }
+    ]
+  },
+  "other_rows": [],
+  "is_demo_data": true
+}

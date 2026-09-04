@@ -94,6 +94,7 @@ try {
         (Join-Path $SkillRoot "run.py"),
         (Join-Path $SkillRoot "LOGIN.ps1"),
         (Join-Path $SkillRoot "rebuild_dashboard_history.py"),
+        (Join-Path $SkillRoot "build_ai_context.py"),
         (Join-Path $SkillRoot "dashboard\package.json"),
         (Join-Path $SkillRoot "deployment_contract.json"),
         (Join-Path $SitesRoot "deployment_contract.json")
@@ -131,6 +132,13 @@ try {
     Write-Host "Step 3: Rebuild dashboard history"
     & $PythonExe .\rebuild_dashboard_history.py --incremental
     if ($LASTEXITCODE -ne 0) { throw "Dashboard history rebuild failed with exit code $LASTEXITCODE" }
+
+    Write-Host "Step 3.5: Build safe AI semantic context"
+    Set-Location $SkillRoot
+    & $PythonExe .\build_ai_context.py
+    if ($LASTEXITCODE -ne 0) { throw "AI context build failed with exit code $LASTEXITCODE" }
+    $AIManifest = Join-Path $SkillRoot "dashboard\public\dashboard_data\ai\manifest.json"
+    if (!(Test-Path $AIManifest)) { throw "AI context manifest not found after build: $AIManifest" }
 
     Write-Host "Step 4: Build dashboard"
     Set-Location (Join-Path $SkillRoot "dashboard")

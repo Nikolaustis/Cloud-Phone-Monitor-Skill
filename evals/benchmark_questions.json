@@ -1,0 +1,23 @@
+[
+  {"id":"market-1","question":"今天市场整体怎么样？","expected_intent":"get_market_overview","min_evidence":2,"should_abstain":false,"expected_number":1},
+  {"id":"market-2","question":"给我一个 market summary","expected_intent":"get_market_overview","min_evidence":2,"should_abstain":false,"expected_number":4},
+  {"id":"market-3","question":"整体价格概览","expected_intent":"get_market_overview","min_evidence":2,"should_abstain":false,"expected_number":1},
+  {"id":"config-1","question":"KVIP 30天价格怎么样？","expected_intent":"search_configs","min_evidence":1,"should_abstain":false,"expected_number":125.0},
+  {"id":"config-2","question":"GVIP 30天价格怎么样？","expected_intent":"search_configs","min_evidence":1,"should_abstain":false,"expected_number":110.0},
+  {"id":"config-3","question":"UVIP 30天价格怎么样？","expected_intent":"search_configs","min_evidence":1,"should_abstain":false,"expected_number":100.0},
+  {"id":"config-4","question":"SVIP 30天价格怎么样？","expected_intent":"search_configs","min_evidence":1,"should_abstain":false,"expected_number":80.0},
+  {"id":"change-1","question":"最近有哪些涨价？","expected_intent":"get_price_changes","min_evidence":1,"should_abstain":false,"expected_number":0.25},
+  {"id":"change-2","question":"最近有哪些降价？","expected_intent":"get_price_changes","min_evidence":1,"should_abstain":false,"expected_number":-0.1},
+  {"id":"change-3","question":"price change 最大的是谁？","expected_intent":"get_price_changes","min_evidence":1,"should_abstain":false,"expected_number":0.25},
+  {"id":"metric-1","question":"UgPhone 相对竞品指数怎么计算？","expected_intent":"get_metric_definition","min_evidence":1,"should_abstain":false,"expected_number":null},
+  {"id":"metric-2","question":"配置相似度指标怎么计算？","expected_intent":"get_metric_definition","min_evidence":1,"should_abstain":false,"expected_number":null},
+  {"id":"metric-3","question":"relative index 的公式是什么？","expected_intent":"get_metric_definition","min_evidence":1,"should_abstain":false,"expected_number":null},
+  {"id":"explain-1","question":"为什么 KVIP 30天被判定为 high？","expected_intent":"explain_configuration","min_evidence":3,"should_abstain":false,"expected_number":125.0},
+  {"id":"explain-2","question":"解释 GVIP 30天为什么略高","expected_intent":"explain_configuration","min_evidence":3,"should_abstain":false,"expected_number":110.0},
+  {"id":"explain-3","question":"KVIP 30天有哪些可比证据？","expected_intent":"explain_configuration","min_evidence":3,"should_abstain":false,"expected_number":94.0},
+  {"id":"trend-1","question":"KVIP 30天历史趋势如何？","expected_intent":"get_price_history","min_evidence":1,"should_abstain":false,"expected_number":15.0},
+  {"id":"trend-2","question":"GVIP 30天 price history","expected_intent":"get_price_history","min_evidence":1,"should_abstain":false,"expected_number":11.0},
+  {"id":"abstain-1","question":"XVIP 999天多少钱？","expected_intent":"abstain","min_evidence":0,"should_abstain":true,"expected_number":null},
+  {"id":"abstain-2","question":"KVIP 365天价格怎么样？","expected_intent":"abstain","min_evidence":0,"should_abstain":true,"expected_number":null},
+  {"id":"abstain-3","question":"MVIP 7天价格怎么样？","expected_intent":"abstain","min_evidence":0,"should_abstain":true,"expected_number":null}
+]

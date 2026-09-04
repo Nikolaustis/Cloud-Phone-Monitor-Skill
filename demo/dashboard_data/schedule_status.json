@@ -1,0 +1,13 @@
+{
+  "scheduler_enabled": false,
+  "scheduler_type": "demo",
+  "schedule_time_local": null,
+  "last_run_time": "2026-09-03T00:00:00+00:00",
+  "last_run_status": "demo",
+  "next_run_time_estimated": null,
+  "last_run_duration_seconds": null,
+  "data_freshness_status": "demo",
+  "stale_after_hours": 30,
+  "logs_path": null,
+  "is_demo_data": true
+}

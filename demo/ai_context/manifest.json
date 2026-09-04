@@ -1,0 +1,34 @@
+{
+  "schema_version": "ai-context-v2",
+  "contract_version": 2,
+  "generated_at_utc": "2026-09-04T02:26:05+00:00",
+  "data_date": "2026-09-03",
+  "data_revision": "demo-v2-revision",
+  "safe_data_only": true,
+  "source": "dashboard_data",
+  "files": {
+    "market_summary.json": 1,
+    "config_index.json": 4,
+    "price_events.json": 3,
+    "pairing_index.json": 4,
+    "trend_index.json": 2,
+    "metric_dictionary.json": 3,
+    "question_examples.json": 6,
+    "market_brief.txt": 4
+  },
+  "market_position_thresholds": {
+    "below_market_lt": 90.0,
+    "competitive_lte": 105.0,
+    "slightly_high_lte": 115.0
+  },
+  "capabilities": [
+    "market_brief",
+    "structured_query",
+    "evidence_grounding",
+    "config_explain",
+    "price_change_query",
+    "price_trend_query",
+    "pairing_evidence",
+    "pricing_what_if"
+  ]
+}

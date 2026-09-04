@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import re
 import time
 from datetime import datetime, timezone
 from pathlib import Path
@@ -54,6 +55,22 @@ UGPHONE_COMPLETE_MIN_COUNTS = {**UGPHONE_AUTH_MIN_COUNTS, "subscription": 0}
 UGPHONE_SUBSCRIPTION_DIAGNOSTIC_MIN = 1
 UGPHONE_REQUIRED_API_TOKENS = ("configlist2",)
 
+GENERIC_LOGIN_URL_TOKENS = ("/login", "/signin", "/sign-in", "#/login", "#/signin")
+GENERIC_LOGIN_TEXT_MARKERS = (
+    "sign in", "log in", "login with", "phone login", "password",
+    "登录", "登入", "登錄",
+)
+GENERIC_AUTH_TEXT_MARKERS = (
+    "log out", "sign out", "account center", "my account", "my devices", "wallet",
+    "退出登录", "退出登入", "账户中心", "帳戶中心", "我的设备", "我的設備", "钱包", "錢包",
+)
+PLATFORM_BUSINESS_MARKERS = {
+    "VSPhone": ("auto renew", "high-end real", "game afk", "android", "cloud phone", "自动续费", "雲手機", "云手机"),
+    "Redfinger": ("cloud phone", "vip", "kvip", "svip", "xvip", "云手机", "雲手機"),
+    "LDCloud": ("cloud phone", "vip", "kvip", "svip", "xvip", "mvip", "云手机", "雲手機"),
+}
+AUTH_KEY_PATTERN = re.compile(r"auth|token|session|user[_-]?id|account[_-]?id|login", re.IGNORECASE)
+
 
 def write_status(path: Path, payload: dict[str, Any]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -72,6 +89,89 @@ def _body_text(page: Page) -> str:
         return (page.locator("body").inner_text(timeout=5_000) or "").lower()
     except Exception:
         return ""
+
+
+def _assess_generic_session_evidence(
+    platform: str,
+    current_url: str,
+    body_text: str,
+    browser_evidence: dict[str, Any],
+) -> dict[str, Any]:
+    """Fail closed unless both authentication and purchase-page evidence exist."""
+    lowered_url = str(current_url or "").lower()
+    lowered_body = str(body_text or "").lower()
+    login_route = any(token in lowered_url for token in GENERIC_LOGIN_URL_TOKENS)
+    visible_password = bool(browser_evidence.get("visible_password_input"))
+    login_markers = [token for token in GENERIC_LOGIN_TEXT_MARKERS if token in lowered_body]
+    auth_text_markers = [token for token in GENERIC_AUTH_TEXT_MARKERS if token in lowered_body]
+    auth_storage_keys = list(browser_evidence.get("auth_storage_keys") or [])
+    auth_cookie_names = list(browser_evidence.get("auth_cookie_names") or [])
+    business_markers = [
+        token for token in PLATFORM_BUSINESS_MARKERS.get(platform, ()) if token in lowered_body
+    ]
+    price_like_count = int(browser_evidence.get("price_like_count") or 0)
+
+    login_gate = bool(login_route or visible_password or (login_markers and not auth_text_markers))
+    authenticated = bool(auth_text_markers or auth_storage_keys or auth_cookie_names)
+    business_ready = bool(business_markers and price_like_count > 0)
+    ok = bool(not login_gate and authenticated and business_ready)
+    if login_gate:
+        reason = "login_page_detected"
+    elif not authenticated:
+        reason = "authenticated_session_evidence_missing"
+    elif not business_ready:
+        reason = "purchase_business_evidence_missing"
+    else:
+        reason = None
+    return {
+        "ok": ok,
+        "reason": reason,
+        "url_after_navigation": current_url,
+        "login_route": login_route,
+        "visible_password_input": visible_password,
+        "login_markers": login_markers,
+        "auth_text_markers": auth_text_markers,
+        "auth_storage_keys": auth_storage_keys,
+        "auth_cookie_names": auth_cookie_names,
+        "business_markers": business_markers,
+        "price_like_count": price_like_count,
+    }
+
+
+def _generic_browser_evidence(page: Page) -> dict[str, Any]:
+    evidence = page.evaluate(
+        """() => {
+          const visible = (node) => {
+            if (!node) return false;
+            const style = getComputedStyle(node);
+            const rect = node.getBoundingClientRect();
+            return style.display !== 'none' && style.visibility !== 'hidden' && rect.width > 0 && rect.height > 0;
+          };
+          const keys = [];
+          for (const storage of [localStorage, sessionStorage]) {
+            for (let i = 0; i < storage.length; i += 1) {
+              const key = storage.key(i);
+              if (key && storage.getItem(key)) keys.push(key);
+            }
+          }
+          const priceLike = Array.from(document.querySelectorAll('[class*="price"], [data-price], [class*="amount"]'))
+            .filter(visible).length;
+          return {
+            visible_password_input: Array.from(document.querySelectorAll('input[type="password"]')).some(visible),
+            storage_keys: Array.from(new Set(keys)).slice(0, 200),
+            price_like_count: priceLike
+          };
+        }"""
+    )
+    cookies = page.context.cookies([page.url])
+    storage_keys = [str(item) for item in (evidence.get("storage_keys") or [])]
+    cookie_names = [str(item.get("name") or "") for item in cookies]
+    return {
+        "visible_password_input": bool(evidence.get("visible_password_input")),
+        "price_like_count": int(evidence.get("price_like_count") or 0),
+        "auth_storage_keys": sorted({key for key in storage_keys if AUTH_KEY_PATTERN.search(key)})[:50],
+        "auth_cookie_names": sorted({key for key in cookie_names if AUTH_KEY_PATTERN.search(key)})[:50],
+    }
 
 def _ugphone_purchase_error(text: str) -> str | None:
     lowered = str(text or "").lower()
@@ -545,14 +645,23 @@ def verify_platform_session(
     if platform == "UgPhone":
         return verify_ugphone_purchase_page(page, target_url, request_capture=request_capture)
 
-    result: dict[str, Any] = {"target_url": target_url, "ok": False, "reason": None}
     try:
         page.goto(target_url, wait_until="domcontentloaded", timeout=45_000)
-        page.wait_for_timeout(2_000)
-        result.update({"ok": True, "url_after_navigation": page.url})
+        page.wait_for_timeout(3_000)
+        result = _assess_generic_session_evidence(
+            platform,
+            page.url,
+            _body_text(page),
+            _generic_browser_evidence(page),
+        )
+        result["target_url"] = target_url
+        return result
     except Exception as exc:
-        result["reason"] = f"navigation_failed: {type(exc).__name__}: {exc}"
-    return result
+        return {
+            "target_url": target_url,
+            "ok": False,
+            "reason": f"navigation_failed: {type(exc).__name__}: {exc}",
+        }
 
 
 def _default_ugphone_profile(save_state_path: Path) -> Path:
@@ -594,7 +703,13 @@ def _run_login_session(
             status["opened_at_utc"] = _now()
             write_status(status_file, status)
 
-            while not signal_file.exists():
+            while True:
+                if signal_file.exists():
+                    try:
+                        if signal_file.read_text(encoding="utf-8").strip() == str(status["session_id"]):
+                            break
+                    except OSError:
+                        pass
                 page.wait_for_timeout(1_000)
 
             if platform == "UgPhone":
@@ -612,7 +727,9 @@ def _run_login_session(
             runtime_context: dict[str, Any] | None = None
             if verification.get("ok"):
                 save_storage_state.parent.mkdir(parents=True, exist_ok=True)
-                context.storage_state(path=str(save_storage_state))
+                temporary_state = save_storage_state.with_name(save_storage_state.name + ".tmp")
+                context.storage_state(path=str(temporary_state))
+                temporary_state.replace(save_storage_state)
                 if platform == "UgPhone" and runtime_context_path is not None:
                     runtime_context = capture_ugphone_runtime_context(page, live_capture)
                     write_ugphone_runtime_context(runtime_context_path, runtime_context)
@@ -684,6 +801,7 @@ def main() -> None:
     )
     parser.add_argument("--signal-file", required=True)
     parser.add_argument("--status-file", required=True)
+    parser.add_argument("--session-id", required=True)
     parser.add_argument("--runtime-context", default=None, help="Private local UgPhone session/runtime snapshot path.")
     args = parser.parse_args()
 
@@ -708,6 +826,8 @@ def main() -> None:
         signal_file.unlink()
 
     status: dict[str, Any] = {
+        "schema_version": 2,
+        "session_id": args.session_id,
         "platform": args.platform,
         "target_url": target.url,
         "entry_url": entry_url,

@@ -26,11 +26,8 @@ $files = @(
 foreach ($name in $files) {
     $sourcePath = Join-Path $Source $name
     if (!(Test-Path $sourcePath)) { throw "Deployment file missing from package: $sourcePath" }
-
     $dest = Join-Path $SitesRoot $name
-    if (Test-Path $dest) {
-        Copy-Item -LiteralPath $dest -Destination (Join-Path $backup $name) -Force
-    }
+    if (Test-Path $dest) { Copy-Item -LiteralPath $dest -Destination (Join-Path $backup $name) -Force }
     Copy-Item -LiteralPath $sourcePath -Destination $dest -Force
 }
 

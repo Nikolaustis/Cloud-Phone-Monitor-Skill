@@ -1,0 +1,86 @@
+{
+  "updated_at": "2026-09-03",
+  "rows_compared": 4,
+  "market_position_counts": {"high": 1, "slightly_high": 1, "competitive": 1, "below_market": 1},
+  "attention_items": [
+    {
+      "ug_config_id": "demo_kvip_30d",
+      "ug_config": "KVIP / Android 10 / 6 cores / 6GB / 64GB",
+      "ug_product_model": "KVIP",
+      "ug_android_version": "10",
+      "ug_cpu": "6 cores",
+      "ug_ram": "6GB",
+      "ug_storage": "64GB",
+      "duration_days": 30,
+      "ug_effective_price_30d": 15.0,
+      "competitor_median_quality_adjusted_price_30d": 12.0,
+      "ugphone_relative_index": 125.0,
+      "market_position_label": "high",
+      "confidence_level": "high",
+      "analysis_status": "current_observed",
+      "data_origin": "current_observed",
+      "competitors": [
+        {"competitor_platform": "VSPhone", "competitor_product_model": "High-end", "competitor_config": "A10 / 6c / 6GB / 64GB", "quality_adjusted_price_30d": 11.8, "config_similarity_score": 94.0, "comparability_level": "strong_match", "included_in_core_median": true},
+        {"competitor_platform": "Redfinger", "competitor_product_model": "VIP", "competitor_config": "A10 / 6c / 6GB / 64GB", "quality_adjusted_price_30d": 12.2, "config_similarity_score": 82.0, "comparability_level": "adjusted_match", "included_in_core_median": true}
+      ]
+    },
+    {
+      "ug_config_id": "demo_gvip_30d",
+      "ug_config": "GVIP / Android 12 / 8 cores / 8GB / 128GB",
+      "ug_product_model": "GVIP",
+      "ug_android_version": "12",
+      "ug_cpu": "8 cores",
+      "ug_ram": "8GB",
+      "ug_storage": "128GB",
+      "duration_days": 30,
+      "ug_effective_price_30d": 11.0,
+      "competitor_median_quality_adjusted_price_30d": 10.0,
+      "ugphone_relative_index": 110.0,
+      "market_position_label": "slightly_high",
+      "confidence_level": "high",
+      "analysis_status": "current_observed",
+      "data_origin": "current_observed",
+      "competitors": [
+        {"competitor_platform": "VSPhone", "competitor_product_model": "High-end", "competitor_config": "A12 / 8c / 8GB / 128GB", "quality_adjusted_price_30d": 9.8, "config_similarity_score": 91.0, "comparability_level": "strong_match", "included_in_core_median": true},
+        {"competitor_platform": "LDCloud", "competitor_product_model": "Pro", "competitor_config": "A12 / 8c / 8GB / 128GB", "quality_adjusted_price_30d": 10.2, "config_similarity_score": 80.0, "comparability_level": "adjusted_match", "included_in_core_median": true}
+      ]
+    },
+    {
+      "ug_config_id": "demo_uvip_30d",
+      "ug_config": "UVIP / Android 12 / 8 cores / 8GB / 128GB",
+      "ug_product_model": "UVIP",
+      "ug_android_version": "12",
+      "ug_cpu": "8 cores",
+      "ug_ram": "8GB",
+      "ug_storage": "128GB",
+      "duration_days": 30,
+      "ug_effective_price_30d": 10.0,
+      "competitor_median_quality_adjusted_price_30d": 10.0,
+      "ugphone_relative_index": 100.0,
+      "market_position_label": "competitive",
+      "confidence_level": "high",
+      "analysis_status": "current_observed",
+      "data_origin": "current_observed",
+      "competitors": []
+    },
+    {
+      "ug_config_id": "demo_svip_30d",
+      "ug_config": "SVIP / Android 10 / 8 cores / 8GB / 128GB",
+      "ug_product_model": "SVIP",
+      "ug_android_version": "10",
+      "ug_cpu": "8 cores",
+      "ug_ram": "8GB",
+      "ug_storage": "128GB",
+      "duration_days": 30,
+      "ug_effective_price_30d": 8.0,
+      "competitor_median_quality_adjusted_price_30d": 10.0,
+      "ugphone_relative_index": 80.0,
+      "market_position_label": "below_market",
+      "confidence_level": "medium",
+      "analysis_status": "carry_forward_last_observed",
+      "data_origin": "carry_forward",
+      "analysis_note": "Synthetic example showing that carry-forward must not be described as a new observation.",
+      "competitors": []
+    }
+  ]
+}
