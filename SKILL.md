@@ -110,7 +110,7 @@ powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\INSTALL.ps1 -InstallDe
 
 The installer is fail-fast: required source files are validated before copy and required installed files are validated again after copy. Missing `install_dependencies_windows.ps1`, `login_controller.py`, or other required files must fail installation rather than produce a partial Skill.
 
-`LOGIN.ps1` does not blindly select the newest Python. It probes discovered Python interpreters and uses one that can import Playwright **and** has Playwright Chromium installed. Google Chrome is not required.
+The installed Skill has one runtime authority: `<SkillRoot>\.venv\Scripts\python.exe`. `LOGIN.ps1`, scheduled collection and deployment verification must use that interpreter and must not silently fall back to PATH/system Python. Only `install_dependencies_windows.ps1` may discover a system Python, solely to create/repair `.venv`. The installer launch-tests Playwright Chromium; Google Chrome is not required.
 
 Developer/test dependencies:
 
@@ -155,7 +155,7 @@ python run.py --quality-price-config path/to/config.json
 
 `LOGIN.ps1` is the Windows orchestration entrypoint. It launches `cloud_phone_monitor.login_controller`, which in turn launches the existing `cloud_phone_monitor.login_wait_for_signal` Playwright helper in a local headed Chromium process.
 
-The controller adds four guarantees around the existing helper:
+The controller/adapter use `LOGIN_PROTOCOL_VERSION = 4` as the session-state contract. The adapter discovers legacy helper CLI capability through `--help`, not by searching helper source text, so controller/helper revisions cannot drift silently. The controller adds these guarantees around the existing helper:
 
 1. Every login attempt has a new `session_id`; stale historical `saved_and_verified` files cannot satisfy a new `-Complete`.
 2. Process management is guarded by PID **plus executable path plus process start time** before signal/kill operations.
@@ -198,6 +198,8 @@ The scheduled login preflight uses the same stronger non-UgPhone saved-state ver
 `python run.py --headed` is a visible collection/debug mode, not the canonical first-login persistence workflow.
 
 Saved login states and login-controller files must remain local under `output/auth/` and must not be uploaded or shared.
+
+Public release tooling must be non-mutating with respect to staging validation: run release-facing Python with bytecode writes disabled (`-B` / `PYTHONDONTWRITEBYTECODE=1`), and reject any unexpected staging file before ZIP creation. `MANIFEST_SHA256.txt` must be regenerated from a clean explicit-allowlist staging tree and verified before upload.
 
 ## Output
 

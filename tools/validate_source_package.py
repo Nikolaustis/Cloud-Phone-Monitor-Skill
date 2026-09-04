@@ -1,50 +1,34 @@
 from __future__ import annotations
 
+import sys
+sys.dont_write_bytecode = True
+
 import argparse
 import os
-import re
 from pathlib import Path
 
-FORBIDDEN_DIRS = {
-    "output", "baselines", "logs", "node_modules", "dist", "__pycache__", ".pytest_cache", ".git",
-}
-FORBIDDEN_SUFFIXES = {".pyc", ".log", ".xlsx", ".xls", ".csv", ".jsonl"}
-FORBIDDEN_FILES = {
-    "publisher.local.json", "PUBLISH_SOURCE_TO_GITHUB.ps1", "install_windows.ps1", "patch_external_ugphone_preflight.py",
-}
-REQUIRED = {
-    ".gitignore",
-    ".gitattributes",
-    "SKILL.md",
-    "README.md",
-    "LOGIN.ps1",
-    "INSTALL.ps1",
-    "install_dependencies_windows.ps1",
-    "requirements.txt",
-    "requirements-dev.txt",
-    "RUN_TESTS.ps1",
-    "run.py",
-    "rebuild_dashboard_history.py",
-    "deployment_contract.json",
-    "publisher.local.example.json",
-    "cloud_phone_monitor/main.py",
-    "cloud_phone_monitor/login_wait_for_signal.py",
-    "cloud_phone_monitor/login_controller.py",
-    "cloud_phone_monitor/auth_session_contract.py",
-    "dashboard/src/App.jsx",
-    "deployment/windows/update_cloud_phone_dashboard.ps1",
-    "deployment/windows/publish_dashboard.ps1",
-    "deployment/windows/validate_cloud_phone_dashboard.py",
-    "deployment/windows/verify_deployment.ps1",
-    "scripts/setup_daily_monitor_windows.ps1",
-    "tests/auth_state_machine/test_auth_session_contract.py",
-    "tests/auth_state_machine/test_login_source_contract.py",
-    "tests/auth_state_machine/windows_login_smoke.ps1",
-}
+try:
+    from tools.public_release_policy import (
+        CONCRETE_GITHUB_REMOTE,
+        FORBIDDEN_DIR_NAMES,
+        FORBIDDEN_FILE_NAMES,
+        FORBIDDEN_SUFFIXES,
+        SENSITIVE_NAME_RE,
+        is_public_source_path,
+        required_public_paths,
+    )
+except ModuleNotFoundError:
+    from public_release_policy import (
+        CONCRETE_GITHUB_REMOTE,
+        FORBIDDEN_DIR_NAMES,
+        FORBIDDEN_FILE_NAMES,
+        FORBIDDEN_SUFFIXES,
+        SENSITIVE_NAME_RE,
+        is_public_source_path,
+        required_public_paths,
+    )
+
 TEXT_SUFFIXES = {".py", ".ps1", ".js", ".jsx", ".json", ".md", ".txt", ".sh", ".bat", ".yml", ".yaml"}
-CONCRETE_GITHUB_REMOTE = re.compile(
-    r"https://github\.com/(?!YOUR_ACCOUNT/)[^/\s\"']+/[^/\s\"']+\.git", re.IGNORECASE
-)
 
 
 def _require_markers(problems: list[str], path: Path, markers: tuple[str, ...], label: str) -> None:
@@ -57,15 +41,13 @@ def _require_markers(problems: list[str], path: Path, markers: tuple[str, ...], 
             problems.append(f"{label} missing required marker: {marker}")
 
 
-def validate(root: Path) -> list[str]:
+def validate(root: Path, *, allow_local_runtime: bool = False, require_exact_public_tree: bool = False) -> list[str]:
+    root = root.resolve()
     problems: list[str] = []
-    for rel in REQUIRED:
-        if not (root / rel).is_file():
-            problems.append(f"required file missing: {rel}")
 
-    for forbidden in FORBIDDEN_FILES:
-        if (root / forbidden).exists():
-            problems.append(f"maintainer/private file must not be public: {forbidden}")
+    for rel in sorted(required_public_paths()):
+        if not (root / rel).is_file():
+            problems.append(f"required public file missing: {rel}")
 
     login_path = root / "LOGIN.ps1"
     if login_path.is_file():
@@ -75,27 +57,11 @@ def validate(root: Path) -> list[str]:
             (
                 "$PSScriptRoot",
                 "cloud_phone_monitor.login_controller",
-                "Resolve-PlaywrightPython",
-                "session_id",
-                "process_start_ticks",
+                ".venv\\Scripts\\python.exe",
                 "LOGIN_AGENT_STATE=WAITING_FOR_USER",
                 "LOGIN_AGENT_STATE=SAVED_AND_VERIFIED",
             ),
             "LOGIN.ps1",
-        )
-
-    installer = root / "INSTALL.ps1"
-    if installer.is_file():
-        _require_markers(
-            problems,
-            installer,
-            (
-                "Validate source package completeness",
-                "Required source package file missing",
-                "Validate installed Skill completeness",
-                "cloud_phone_monitor\\login_controller.py",
-            ),
-            "INSTALL.ps1",
         )
 
     controller = root / "cloud_phone_monitor" / "login_controller.py"
@@ -104,54 +70,45 @@ def validate(root: Path) -> list[str]:
             problems,
             controller,
             (
-                "signal_matches_session",
-                "verify_saved_auth_state",
-                ".pending.",
-                "session_id",
+                "LOGIN_PROTOCOL_VERSION",
+                "normalize_session_id",
+                "cloud_phone_monitor.login_helper_session_entry",
+                "commit_auth_artifacts",
+                "acquire_profile_lock",
             ),
             "login_controller.py",
         )
 
-
-    auth_contract = root / "cloud_phone_monitor" / "auth_session_contract.py"
-    if auth_contract.is_file():
+    profile_lock = root / "cloud_phone_monitor" / "profile_lock.py"
+    if profile_lock.is_file():
         _require_markers(
             problems,
-            auth_contract,
+            profile_lock,
             (
-                "no_server_acknowledged_auth_evidence",
-                "signal_matches_session",
-                "server_authenticated",
+                "O_CREAT",
+                "O_EXCL",
+                "ProfileLockError",
+                "process_identity",
+                "lock_owner_matches_process",
             ),
-            "auth_session_contract.py",
-        )
-
-    skill_path = root / "SKILL.md"
-    if skill_path.is_file():
-        _require_markers(
-            problems,
-            skill_path,
-            (
-                "Authentication execution routing (hard rule)",
-                "LOGIN.ps1 <Platform> -Start",
-                "LOGIN.ps1 <Platform> -Complete",
-                "Do not substitute Cloud Browser",
-            ),
-            "SKILL.md",
+            "profile_lock.py",
         )
 
     for current, dirs, files in os.walk(root):
         cur = Path(current)
-        rel_parts = set(cur.relative_to(root).parts)
-        if rel_parts & FORBIDDEN_DIRS:
-            problems.append(f"forbidden directory included: {cur.relative_to(root)}")
+        rel_dir = cur.relative_to(root)
+        rel_parts = set(rel_dir.parts)
+        if rel_parts & FORBIDDEN_DIR_NAMES:
+            if not allow_local_runtime:
+                problems.append(f"forbidden directory included: {rel_dir}")
             dirs[:] = []
             continue
 
         kept_dirs = []
         for directory in dirs:
-            if directory in FORBIDDEN_DIRS:
-                problems.append(f"forbidden directory included: {(cur / directory).relative_to(root)}")
+            if directory in FORBIDDEN_DIR_NAMES:
+                if not allow_local_runtime:
+                    problems.append(f"forbidden directory included: {(cur / directory).relative_to(root)}")
             else:
                 kept_dirs.append(directory)
         dirs[:] = kept_dirs
@@ -159,29 +116,48 @@ def validate(root: Path) -> list[str]:
         for name in files:
             path = cur / name
             rel = path.relative_to(root)
-            if name in FORBIDDEN_FILES:
-                problems.append(f"maintainer/private file must not be public: {rel}")
+            rel_text = rel.as_posix()
+            if path.is_symlink():
+                problems.append(f"symlink is not allowed in public source: {rel_text}")
+                continue
+            if name in FORBIDDEN_FILE_NAMES:
+                problems.append(f"maintainer/private file must not be public: {rel_text}")
             if path.suffix.lower() in FORBIDDEN_SUFFIXES:
-                problems.append(f"forbidden generated/private file: {rel}")
-            low = name.lower()
-            if low.endswith("_state.json") or "cookie" in low or "token" in low:
-                problems.append(f"possible credential file: {rel}")
+                problems.append(f"forbidden generated/private file: {rel_text}")
+            if SENSITIVE_NAME_RE.search(name) and rel_text not in {
+                "cloud_phone_monitor/auth_session_contract.py",
+                "cloud_phone_monitor/auth_file_transaction.py",
+                "cloud_phone_monitor/login_controller.py",
+                "cloud_phone_monitor/login_helper_session_entry.py",
+                "cloud_phone_monitor/login_wait_for_signal.py",
+                "deployment/windows/check_skill_login_state.py",
+            }:
+                problems.append(f"possible runtime credential artifact: {rel_text}")
+            if require_exact_public_tree and name != "MANIFEST_SHA256.txt" and not is_public_source_path(rel_text):
+                problems.append(f"file is outside explicit public allowlist: {rel_text}")
             if path.suffix.lower() in TEXT_SUFFIXES:
                 try:
                     text = path.read_text(encoding="utf-8")
                 except UnicodeDecodeError:
                     continue
                 if CONCRETE_GITHUB_REMOTE.search(text):
-                    problems.append(f"concrete GitHub remote found in public source: {rel}")
+                    problems.append(f"concrete GitHub remote found in public source: {rel_text}")
+
     return problems
 
 
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("root", nargs="?", default=".")
+    parser.add_argument("--working-tree", action="store_true", help="Ignore local runtime directories excluded from release staging.")
+    parser.add_argument("--exact-public-tree", action="store_true", help="Reject any source file outside the explicit public release allowlist.")
     args = parser.parse_args()
     root = Path(args.root).resolve()
-    problems = validate(root)
+    problems = validate(
+        root,
+        allow_local_runtime=args.working_tree,
+        require_exact_public_tree=args.exact_public_tree,
+    )
     if problems:
         print("Source package validation failed:")
         for item in problems:

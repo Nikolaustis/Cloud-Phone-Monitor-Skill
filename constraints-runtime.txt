@@ -1,0 +1,2 @@
+# Playwright package/browser pairing is intentionally pinned for reproducible Windows installs.
+playwright==1.62.0

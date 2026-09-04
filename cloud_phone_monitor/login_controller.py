@@ -11,8 +11,15 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-from cloud_phone_monitor.auth_session_contract import evaluate_auth_evidence, signal_matches_session
+from cloud_phone_monitor.auth_file_transaction import commit_auth_artifacts, pending_path, remove_file
+from cloud_phone_monitor.auth_session_contract import (
+    LOGIN_PROTOCOL_VERSION,
+    evaluate_auth_evidence,
+    normalize_session_id,
+    signal_matches_session,
+)
 from cloud_phone_monitor.config import MonitorConfig
+from cloud_phone_monitor.profile_lock import ProfileLockError, acquire_profile_lock
 from cloud_phone_monitor.utils.browser import launch_browser
 
 
@@ -35,27 +42,15 @@ def _write_json(path: Path, payload: dict[str, Any]) -> None:
     tmp.replace(path)
 
 
-
-def _pending_path(final_path: Path, session_id: str) -> Path:
-    return final_path.with_name(f"{final_path.name}.pending.{session_id}")
-
-
-def _remove_file(path: Path | None) -> None:
-    if path is None:
-        return
+def _ensure_within(base: Path, path: Path, label: str) -> Path:
+    base = base.resolve()
+    path = path.resolve()
     try:
-        path.unlink(missing_ok=True)
-    except Exception:
-        pass
+        path.relative_to(base)
+    except ValueError as exc:
+        raise RuntimeError(f"{label} must remain under {base}: {path}") from exc
+    return path
 
-
-def _replace_file(pending: Path | None, final: Path | None) -> None:
-    if pending is None or final is None:
-        return
-    if not pending.is_file() or pending.stat().st_size <= 2:
-        raise RuntimeError(f"pending auth artifact missing or empty: {pending}")
-    final.parent.mkdir(parents=True, exist_ok=True)
-    pending.replace(final)
 
 
 IDENTITY_KEY_RE = re.compile(
@@ -193,13 +188,26 @@ def verify_saved_auth_state(platform: str, target_url: str, storage_state: Path)
         return result
 
 
-def _wait_for_helper_status(path: Path, proc: subprocess.Popen[Any], timeout: float) -> dict[str, Any]:
+def _wait_for_helper_status(
+    path: Path,
+    proc: subprocess.Popen[Any],
+    timeout: float,
+    *,
+    session_id: str,
+) -> dict[str, Any]:
     deadline = time.monotonic() + timeout
     last: dict[str, Any] | None = None
     while time.monotonic() < deadline:
         current = _read_json(path)
         if current is not None:
             last = current
+            current_session = str(current.get("session_id") or "").strip()
+            if current_session and current_session != session_id:
+                return {
+                    "status": "helper_session_mismatch",
+                    "session_id": current_session,
+                    "expected_session_id": session_id,
+                }
             if current.get("status") == "waiting_for_user_signal":
                 return current
             if current.get("status") in {"failed", "verification_failed", "verification_failed_after_reopen"}:
@@ -207,7 +215,7 @@ def _wait_for_helper_status(path: Path, proc: subprocess.Popen[Any], timeout: fl
         if proc.poll() is not None:
             break
         time.sleep(0.25)
-    return last or {"status": "helper_status_timeout"}
+    return last or {"status": "helper_status_timeout", "session_id": session_id}
 
 
 def _wait_for_signal(path: Path, session_id: str, proc: subprocess.Popen[Any]) -> None:
@@ -266,24 +274,35 @@ def main() -> int:
 
     config = MonitorConfig.default()
     target = config.targets[args.platform]
-    session_id = str(args.session_id).strip()
-    if not session_id:
-        raise SystemExit("session id is required")
+    try:
+        session_id = normalize_session_id(args.session_id)
+    except ValueError as exc:
+        raise SystemExit(f"invalid --session-id; canonical UUID required: {exc}") from exc
 
-    final_state = Path(args.save_storage_state).resolve()
-    pending_state = _pending_path(final_state, session_id)
-    final_runtime = Path(args.runtime_context).resolve() if args.runtime_context else None
-    pending_runtime = _pending_path(final_runtime, session_id) if final_runtime else None
-    signal_file = Path(args.signal_file).resolve()
-    status_file = Path(args.status_file).resolve()
+    skill_root = Path(__file__).resolve().parents[1]
+    auth_root = (skill_root / "output" / "auth").resolve()
+    auth_root.mkdir(parents=True, exist_ok=True)
+
+    final_state = _ensure_within(auth_root, Path(args.save_storage_state), "storage state")
+    pending_state = pending_path(final_state, session_id)
+    final_runtime = (
+        _ensure_within(auth_root, Path(args.runtime_context), "runtime context")
+        if args.runtime_context else None
+    )
+    pending_runtime = pending_path(final_runtime, session_id) if final_runtime else None
+    signal_file = _ensure_within(auth_root, Path(args.signal_file), "signal file")
+    status_file = _ensure_within(auth_root, Path(args.status_file), "status file")
+    if args.persistent_profile:
+        _ensure_within(auth_root, Path(args.persistent_profile), "persistent profile")
     helper_signal = signal_file.with_name(f"{signal_file.name}.helper.{session_id}")
     helper_status = status_file.with_name(f"{status_file.name}.helper.{session_id}.json")
 
     for path in (signal_file, helper_signal, helper_status, pending_state, pending_runtime):
-        _remove_file(path)
+        remove_file(path)
 
     status: dict[str, Any] = {
-        "schema_version": 2,
+        "schema_version": LOGIN_PROTOCOL_VERSION,
+        "login_protocol_version": LOGIN_PROTOCOL_VERSION,
         "session_id": session_id,
         "platform": args.platform,
         "target_url": target.url,
@@ -300,9 +319,11 @@ def main() -> int:
     cmd = [
         sys.executable,
         "-m",
-        "cloud_phone_monitor.login_wait_for_signal",
+        "cloud_phone_monitor.login_helper_session_entry",
         "--platform",
         args.platform,
+        "--session-id",
+        session_id,
         "--save-storage-state",
         str(pending_state),
         "--signal-file",
@@ -318,10 +339,27 @@ def main() -> int:
         cmd += ["--runtime-context", str(pending_runtime)]
 
     proc: subprocess.Popen[Any] | None = None
+    profile_lock = None
     try:
+        if args.platform == "UgPhone" and args.persistent_profile:
+            profile_path = Path(args.persistent_profile).resolve()
+            profile_lock = acquire_profile_lock(
+                profile_path,
+                platform="UgPhone",
+                owner_kind="login_controller",
+                session_id=session_id,
+                timeout_seconds=0.0,
+            )
+            status["profile_lock"] = {
+                "path": str(profile_lock.path),
+                "lease_id": profile_lock.lease_id,
+                "owner_kind": "login_controller",
+            }
+            _write_json(status_file, status)
+
         proc = subprocess.Popen(cmd, cwd=str(Path(__file__).resolve().parents[1]))
         status["helper_process_id"] = proc.pid
-        helper_ready = _wait_for_helper_status(helper_status, proc, timeout=90.0)
+        helper_ready = _wait_for_helper_status(helper_status, proc, timeout=110.0, session_id=session_id)
         status["helper_status"] = helper_ready
         if helper_ready.get("status") != "waiting_for_user_signal":
             raise RuntimeError(f"login helper failed before user interaction: {helper_ready.get('status')}")
@@ -336,10 +374,12 @@ def main() -> int:
         status["signal_received_at_utc"] = _now()
         _write_json(status_file, status)
 
-        exit_code = _wait_for_child(proc, timeout=360.0)
+        exit_code = _wait_for_child(proc, timeout=450.0)
         helper_final = _read_json(helper_status) or {}
         status["helper_exit_code"] = exit_code
         status["helper_status"] = helper_final
+        if str(helper_final.get("session_id") or "").strip() != session_id:
+            raise RuntimeError("login helper final status does not belong to the active session")
         if exit_code != 0 or helper_final.get("status") != "saved_and_verified":
             reason = helper_final.get("error") or helper_final.get("failure_classification") or helper_final.get("status")
             raise RuntimeError(f"login helper did not verify the session: {reason}")
@@ -360,9 +400,18 @@ def main() -> int:
                 f"post-save authentication verification failed: {post_verification.get('reason')}"
             )
 
-        _replace_file(pending_state, final_state)
-        if pending_runtime is not None and pending_runtime.exists():
-            _replace_file(pending_runtime, final_runtime)
+        commit_artifacts = [(pending_state, final_state)]
+        if pending_runtime is not None:
+            commit_artifacts.append((pending_runtime, final_runtime))
+        status["commit_transaction"] = commit_auth_artifacts(
+            session_id=session_id,
+            artifacts=commit_artifacts,
+        )
+        if args.platform == "UgPhone" and args.persistent_profile:
+            status["persistent_profile_transaction_note"] = (
+                "Persistent Chromium profiles are not atomically committed with storage/runtime files; "
+                "the helper verified the profile before the file transaction committed."
+            )
 
         status["status"] = "saved_and_verified"
         status["saved_at_utc"] = _now()
@@ -379,7 +428,12 @@ def main() -> int:
         if proc is not None and proc.poll() is None:
             _terminate_process_tree(proc)
         for path in (helper_signal, helper_status, pending_state, pending_runtime):
-            _remove_file(path)
+            remove_file(path)
+        if profile_lock is not None:
+            try:
+                profile_lock.release()
+            except Exception:
+                pass
 
 
 if __name__ == "__main__":

@@ -113,10 +113,17 @@ def main() -> int:
     if ug_base_ok and not args.skip_live_ugphone:
         try:
             from cloud_phone_monitor.login_wait_for_signal import _reopen_and_verify_persistent_profile
+            from cloud_phone_monitor.profile_lock import locked_profile
 
-            verification = _reopen_and_verify_persistent_profile(
-                "UgPhone", targets["UgPhone"].url, ug_profile, ug_runtime, headless=True
-            )
+            with locked_profile(
+                ug_profile,
+                platform="UgPhone",
+                owner_kind="login_preflight",
+                timeout_seconds=0.0,
+            ):
+                verification = _reopen_and_verify_persistent_profile(
+                    "UgPhone", targets["UgPhone"].url, ug_profile, ug_runtime, headless=True
+                )
             ug_result["live_verification"] = verification
             ug_result["ok"] = bool(verification.get("ok"))
             ug_result["status"] = "ok_live_verified_persistent_profile" if ug_result["ok"] else str(

@@ -1,120 +1,135 @@
 # Cloud Phone Baseline Price Monitor
 
-Cloud Phone Baseline Price Monitor 用于采集和比较 UgPhone、VSPhone、Redfinger、LDCloud 的云手机产品价格，并提供本地 Dashboard、历史趋势、同周期价格比较和配置相似度分析。
+面向 **UgPhone、VSPhone、Redfinger、LDCloud** 的云手机价格监测与竞品分析 Skill。项目将 Playwright 采集、登录态持久化、基准价监测、同周期竞品比较和只读 Dashboard 组合为一套可重复部署的本地工作流。
 
-## 主要功能
+> 本仓库只包含源码与公开配置模板。登录态、Cookie、Token、浏览器 profile、私有 baseline、运行日志和发布凭据均不属于公开源码。
 
-- **多平台价格采集**：统一整理 UgPhone、VSPhone、Redfinger、LDCloud 的套餐、配置、地区、购买时长、价格和促销信息。
-- **基准价监测**：将当前价格与已确认的 baseline 比较，识别涨价、降价、缺失和促销文案变化。
-- **同周期价格比较**：按相同购买时长比较不同平台的成交价。
-- **近似配置配对**：根据 Android、CPU、内存、存储、地区和购买时长评估配置相似度。
-- **订阅 / 非订阅价格**：UgPhone 与 VSPhone 通过 `purchase_mode` 区分自动续费开启和关闭时的价格。
-- **历史趋势**：支持当前价、上次价格、7 日均价、30 日均价和长期价格趋势。
-- **只读 Dashboard**：网页只展示采集后的业务数据，不会从浏览器触发购买、支付、订阅或采集操作。
+## 核心能力
 
-## 支持的平台
+- **多平台价格采集**：统一整理套餐、配置、Android 版本、地区、购买周期、价格、库存和促销信息。
+- **基准价监测**：比较当前观测值、上次有效观测与 baseline，识别涨跌、缺失和促销文案变化。
+- **同周期竞品比较**：按购买时长和近似配置比较 UgPhone 与竞品价格。
+- **订阅 / 非订阅区分**：UgPhone、VSPhone 显式区分自动续费开启与关闭的价格状态。
+- **本地登录态持久化**：使用本机 Playwright Chromium 建立 collector authentication；不依赖系统 Chrome。
+- **会话安全**：两阶段登录使用 UUID session、pending 状态、重新打开验证和事务式文件提交。
+- **Persistent profile 互斥**：UgPhone 登录、登录预检和 canonical collector 共用 profile lock，避免并发打开同一 Chromium profile。
+- **只读 Dashboard**：展示价格、趋势、配置配对、变价和文本变化，不从前端触发采集或购买行为。
+- **公开发布防泄漏**：GitHub release 使用显式 allowlist staging，而不是直接打包开发工作区。
 
-| Platform | 主要采集内容 |
-|---|---|
-| UgPhone | 套餐、Android 版本、地区、购买周期、订阅/非订阅价格 |
-| VSPhone | 套餐、配置、购买周期、订阅/非订阅价格 |
-| Redfinger | 套餐、Android、地区、有效价格 SKU |
-| LDCloud | 套餐、配置、地区、购买周期和价格 |
+## 架构概览
 
-## 安装
+```text
+LOGIN.ps1 / run.py
+        ↓
+专用 .venv + session/profile guards
+        ↓
+Playwright Chromium
+        ↓
+平台 scraper / auth verifier
+        ↓
+output/（本地私有运行数据）
+        ↓
+历史重建 / Dashboard 导出
+```
 
-### Windows
+进一步说明：
 
-下载或克隆仓库后，在项目根目录运行：
+- [架构说明](docs/ARCHITECTURE.md)
+- [认证与登录态设计](docs/AUTHENTICATION_DESIGN.md)
+- [公开发布流程](docs/RELEASE_PROCESS.md)
+- [安全策略](SECURITY.md)
+- [贡献说明](CONTRIBUTING.md)
+
+## 支持平台
+
+| Platform | 主要采集内容 | 登录态主要形式 |
+|---|---|---|
+| UgPhone | 套餐、Android、地区、购买周期、订阅/非订阅价格 | persistent profile + storage state + runtime context |
+| VSPhone | 套餐、配置、购买周期、订阅/非订阅价格 | Playwright storage state |
+| Redfinger | 套餐、Android、地区、有效价格 SKU | Playwright storage state |
+| LDCloud | 套餐、配置、地区、购买周期、价格 | Playwright storage state |
+
+## Windows 快速开始
+
+### 1. 安装 Skill
 
 ```powershell
 powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\INSTALL.ps1
 ```
 
-首次使用并需要安装依赖时：
+新机器同时建立专用 Python / Playwright 运行环境：
 
 ```powershell
-powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\INSTALL.ps1 -InstallDependencies
+powershell.exe -NoProfile -ExecutionPolicy Bypass `
+  -File .\INSTALL.ps1 -InstallDependencies
 ```
 
-也可以单独安装依赖：
+也可以只安装 Python/Playwright 依赖：
 
 ```powershell
-powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\install_dependencies_windows.ps1
+powershell.exe -NoProfile -ExecutionPolicy Bypass `
+  -File .\install_dependencies_windows.ps1
 ```
 
-更完整的安装说明见 [INSTALL_GUIDE.md](INSTALL_GUIDE.md)。
-
-## 登录
-
-用于自动采集的登录必须在 Skill 启动的**本机 Playwright Chromium** 中完成。ChatGPT Work / Cloud Browser 的浏览器会话与本机采集器隔离，不能作为 `output/auth/` 的登录状态来源。
-
-### 人工 PowerShell 登录
-
-在 Skill 根目录直接运行：
-
-```powershell
-.\LOGIN.ps1 UgPhone
-.\LOGIN.ps1 VSPhone
-.\LOGIN.ps1 Redfinger
-.\LOGIN.ps1 LDCloud
-```
-
-脚本会启动本机 Chromium。请在弹出的窗口中完成登录，保持窗口打开，然后回到 PowerShell 按 Enter。
-
-### Work / Codex 本地 Agent 两阶段登录
-
-当聊天中的 Agent **确实具备当前电脑的本地 Windows shell / 项目文件系统执行能力**时，应使用两阶段模式，而不是让 Agent 打开 Cloud Browser：
-
-```powershell
-# 1. Agent 启动本机 Chromium，然后立即把控制权交还给聊天
-.\LOGIN.ps1 UgPhone -Start
-
-# 2. 用户在本机 Chromium 完成登录，并在聊天中回复“已完成”后
-.\LOGIN.ps1 UgPhone -Complete
-```
-
-`-Start` 成功会输出 `LOGIN_AGENT_STATE=WAITING_FOR_USER`；`-Complete` 验证成功会输出 `LOGIN_AGENT_STATE=SAVED_AND_VERIFIED`。同样适用于 VSPhone、Redfinger、LDCloud。还可使用 `-Status` 查看会话状态，或用 `-Cancel` 放弃未完成会话。
-
-如果当前聊天**没有本地 shell 能力**，应停止自动登录流程，不得改用 Cloud Browser；此时请手工运行上面的 `LOGIN.ps1` 命令。
-
-UgPhone 会继续保存并验证三层本地认证材料：
+正式运行时固定为：
 
 ```text
-output/auth/ugphone_profile/                 # 长期主要登录态
-output/auth/ugphone_state.json               # Playwright storage state
-output/auth/ugphone_runtime_context.json     # 短期运行桥接
+<SkillRoot>\.venv\Scripts\python.exe
 ```
 
-两阶段 Agent 登录会额外临时创建 `output/auth/ugphone_login_agent_session.json`（其他平台使用各自前缀），只记录本地进程与路径等编排信息，完成或取消后自动删除。
+系统 Google Chrome 不是必需项；安装脚本会安装与 Python Playwright 配套的 Chromium，并执行一次 headless launch probe。
 
-`python run.py --headed` 仍可用于可见模式调试采集，但不再作为正式的首次登录/保存入口。
+### 2. 建立本地登录态
 
-登录状态、Cookie、Token、Agent 控制文件和账号信息都属于本地私有数据，不应上传或共享。
+人工 PowerShell：
 
-## 基本使用
-
-采集：
-
-```bash
-python run.py
+```powershell
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\LOGIN.ps1 UgPhone
 ```
 
-第一次确认采集结果无误后初始化 baseline：
+Agent 两阶段登录：
 
-```bash
-python run.py --init-baseline
+```powershell
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\LOGIN.ps1 UgPhone -Start
 ```
 
-默认 baseline：
+在脚本打开的**本机 Chromium** 中完成登录后：
+
+```powershell
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\LOGIN.ps1 UgPhone -Complete
+```
+
+只有当前 session 完成验证后才会输出：
 
 ```text
-baselines/products_baseline.xlsx
+LOGIN_AGENT_STATE=SAVED_AND_VERIFIED
+```
+
+ChatGPT Work / Cloud Browser 的远程浏览器会话不能作为本地 collector 登录态来源。
+
+### 3. 采集
+
+使用 canonical 入口：
+
+```powershell
+.\.venv\Scripts\python.exe .\run.py
+```
+
+单平台：
+
+```powershell
+.\.venv\Scripts\python.exe .\run.py --platform UgPhone
+```
+
+首次确认数据正确后初始化 baseline：
+
+```powershell
+.\.venv\Scripts\python.exe .\run.py --init-baseline
 ```
 
 ## Dashboard
 
-本地查看：
+本地开发：
 
 ```bash
 cd dashboard
@@ -122,59 +137,81 @@ npm ci
 npm run dev
 ```
 
-默认地址通常为：
+历史重建：
 
-```text
-http://127.0.0.1:5173/
+```powershell
+.\.venv\Scripts\python.exe .\rebuild_dashboard_history.py --incremental
 ```
 
-生成历史数据并构建静态 Dashboard：
+Dashboard 是只读业务界面，不包含下单、购买、支付、续费或创建云手机实例的操作。
 
-```bash
-python rebuild_dashboard_history.py --incremental
-cd dashboard
-npm run build
-```
+## 认证安全模型
 
-Dashboard 是只读界面，不包含购买、支付、续费或下单能力。
+登录成功不等价于“网页能打开”或“存在 Cookie”。验证要求至少包括认证证据和业务页面证据。
 
-## 可选：发布到 GitHub Pages
-
-默认情况下，自动更新只执行：
+UgPhone 以 persistent profile 为长期主要认证权威，同时保存：
 
 ```text
-采集 → 历史重建 → Dashboard 构建 → 数据校验
+output/auth/ugphone_profile/
+output/auth/ugphone_state.json
+output/auth/ugphone_runtime_context.json
 ```
 
-不会执行 Git push。
+新的 storage/runtime 文件先写入 session-specific pending 路径，验证成功后才提交。Persistent Chromium profile 本身不能参与普通多文件事务，因此通过重新打开验证和跨流程互斥降低并发风险。
 
-如果希望把构建后的 Dashboard 发布到自己的 GitHub Pages 仓库：
+## 测试
 
-1. 将 `publisher.local.example.json` 复制为 `publisher.local.json`。
-2. 在 `publisher.local.json` 中填写自己的 `dashboard_site_remote`。
-3. 可选填写本地仓库路径、分支和提交信息前缀。
+```powershell
+powershell.exe -NoProfile -ExecutionPolicy Bypass `
+  -File .\install_dependencies_windows.ps1 -InstallDevDependencies
 
-`publisher.local.json` 已被 `.gitignore` 排除，仅作为本地配置使用。
+powershell.exe -NoProfile -ExecutionPolicy Bypass `
+  -File .\RUN_TESTS.ps1
+```
 
-## 缺失数据与历史连续性
+GitHub Actions 同时覆盖：
 
-采集不到某个普通商品并不等于商品已经下架。系统会区分当前真实采集值、暂时缺失采集、不可售、已下架、历史沿用值以及未知状态。
+- Linux：Python 行为测试、公开文件策略、staging、Manifest 一致性。
+- Windows：专用 `.venv`、Playwright Chromium launch probe、Windows PowerShell 状态机 smoke test。
 
-## 数据安全
+## 公开发布
 
-以下内容应保留在本地：
+不要直接把整个开发工作目录上传到 GitHub。Canonical release：
+
+```powershell
+powershell.exe -NoProfile -ExecutionPolicy Bypass `
+  -File .\PREPARE_RELEASE.ps1
+```
+
+流程：
 
 ```text
-output/auth/
+测试
+→ explicit allowlist staging
+→ deployment_contract 公共字段净化
+→ staged-source 校验
+→ deterministic Manifest
+→ Manifest 二次校验
+→ deterministic public ZIP
+```
+
+`tools/public_release_policy.py` 是公开文件范围的单一权威来源。公开 staging 不包含 `.venv/`、`output/`、baselines、日志、profile、登录态、私有部署脚本或本地发布配置。Release 工具统一禁止写入 Python bytecode，ZIP 构建器也只接受 allowlist 文件和已验证 Manifest；任何 `__pycache__`、`.pyc` 或其他 staging 污染都会 fail-closed。
+
+## 数据与隐私
+
+以下内容必须保留在本地：
+
+```text
+output/
 baselines/
-output/.history_cache/
+.venv/
 publisher.local.json
 ```
 
-不要公开 Cookie、Token、Playwright storage state、持久化浏览器登录配置、账号信息、私有 baseline、本地发布配置或未脱敏诊断数据。
+尤其不要公开：Cookie、Token、Playwright storage state、Chromium profile、runtime context、账号信息、未脱敏诊断数据和具体私有 Git remote。
 
 详见 [DEPLOYMENT_DATA_GUIDE.md](DEPLOYMENT_DATA_GUIDE.md)。
 
 ## Disclaimer
 
-本项目用于价格监测、数据整理和业务分析。使用时应遵守相关网站的服务条款、账号规则和当地法律法规。
+本项目用于价格监测、数据整理和业务分析。使用者应自行确保采集和账号操作符合目标平台服务条款、账号规则及适用法律法规。

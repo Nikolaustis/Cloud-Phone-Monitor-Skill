@@ -68,96 +68,93 @@ function Invoke-CapturedProcess {
     }
 }
 
-function Get-PythonCandidates {
-    $candidates = New-Object System.Collections.Generic.List[object]
-    $seen = @{}
-
-    function Add-Candidate([string]$Exe, [string[]]$Prefix = @(), [string]$Label = "") {
-        if ([string]::IsNullOrWhiteSpace($Exe)) { return }
-        $key = (($Exe + "|" + ($Prefix -join " ")).ToLowerInvariant())
-        if ($seen.ContainsKey($key)) { return }
-        $seen[$key] = $true
-        $candidates.Add([pscustomobject]@{ Exe = $Exe; Prefix = @($Prefix); Label = $Label })
-    }
-
-    foreach ($fixed in @("C:\Python314\python.exe", "C:\Python313\python.exe", "C:\Python312\python.exe")) {
-        if (Test-Path $fixed) { Add-Candidate $fixed @() $fixed }
-    }
-
-    foreach ($pattern in @(
-        (Join-Path $env:LOCALAPPDATA "Programs\Python\Python*\python.exe"),
-        (Join-Path $env:LOCALAPPDATA "Python\pythoncore-*\python.exe"),
-        (Join-Path $env:LOCALAPPDATA "Python\bin\python.exe")
-    )) {
-        Get-ChildItem -Path $pattern -File -ErrorAction SilentlyContinue | ForEach-Object {
-            Add-Candidate $_.FullName @() $_.FullName
-        }
-    }
-
-    $pythonCommand = Get-Command python -ErrorAction SilentlyContinue
-    if ($pythonCommand) { Add-Candidate $pythonCommand.Source @() "PATH python" }
-
-    $pyCommand = Get-Command py -ErrorAction SilentlyContinue
-    if ($pyCommand) { Add-Candidate $pyCommand.Source @("-3") "py -3" }
-
-    return @($candidates)
-}
-
 function Resolve-PlaywrightPython {
-    $diagnostics = New-Object System.Collections.Generic.List[string]
+    # LOGIN.ps1 never falls back to a system/PATH Python.  The dependency
+    # installer is the only component allowed to discover a base interpreter;
+    # all production/login/scheduled execution is pinned to this Skill .venv.
+    $lockedVenv = Join-Path $SkillRoot ".venv\Scripts\python.exe"
+    if (!(Test-Path $lockedVenv)) {
+        throw @"
+Dedicated Skill runtime is missing:
+  $lockedVenv
+
+Create/repair it with:
+  powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\install_dependencies_windows.ps1
+
+Google Chrome is not required; the installer provisions Playwright Chromium.
+"@
+    }
+
     $probeCode = @'
-import os, sys
+import importlib.metadata as md, json, os, pathlib, sys
+from playwright.sync_api import sync_playwright
+expected = pathlib.Path(sys.argv[1]).resolve()
+actual = pathlib.Path(sys.executable).resolve()
+if os.path.normcase(str(expected)) != os.path.normcase(str(actual)):
+    print(f"WRONG_PYTHON:{actual}")
+    raise SystemExit(31)
+p = sync_playwright().start()
 try:
-    import playwright
-    from playwright.sync_api import sync_playwright
-except Exception as exc:
-    print(f"PLAYWRIGHT_IMPORT_ERROR:{type(exc).__name__}:{exc}")
-    raise SystemExit(21)
-try:
-    p = sync_playwright().start()
     browser_path = p.chromium.executable_path
+    if not browser_path or not os.path.exists(browser_path):
+        print("CHROMIUM_EXECUTABLE_MISSING")
+        raise SystemExit(32)
+    browser = p.chromium.launch(headless=True)
+    browser.close()
+finally:
     p.stop()
-except Exception as exc:
-    print(f"PLAYWRIGHT_PROBE_ERROR:{type(exc).__name__}:{exc}")
-    raise SystemExit(22)
-print("PYTHON=" + sys.executable)
+try:
+    version = md.version("playwright")
+except Exception:
+    version = "unknown"
+print("PYTHON=" + str(actual))
+print("PYTHON_VERSION=" + sys.version.split()[0])
+print("PLAYWRIGHT_VERSION=" + version)
 print("CHROMIUM=" + str(browser_path))
-raise SystemExit(0 if browser_path and os.path.exists(browser_path) else 23)
+print("LAUNCH_PROBE_OK=true")
 '@
 
-    foreach ($candidate in Get-PythonCandidates) {
-        $version = Invoke-CapturedProcess -FilePath $candidate.Exe -Arguments (@($candidate.Prefix) + @("--version")) -TimeoutSeconds 15
-        if (-not $version.Started -or $version.ExitCode -ne 0) {
-            $diagnostics.Add("[SKIP] $($candidate.Label): not runnable ($($version.Stderr.Trim()))")
-            continue
-        }
-        $probeEncoded = [Convert]::ToBase64String([System.Text.Encoding]::UTF8.GetBytes($probeCode))
-        $probeRunner = "import base64;exec(base64.b64decode('$probeEncoded'))"
-        $probe = Invoke-CapturedProcess -FilePath $candidate.Exe -Arguments (@($candidate.Prefix) + @("-c", $probeRunner)) -TimeoutSeconds 30
-        $versionText = (($version.Stdout + " " + $version.Stderr).Trim())
-        if ($probe.ExitCode -eq 0) {
-            $pythonLine = ($probe.Stdout -split "`r?`n" | Where-Object { $_ -like "PYTHON=*" } | Select-Object -First 1)
-            $browserLine = ($probe.Stdout -split "`r?`n" | Where-Object { $_ -like "CHROMIUM=*" } | Select-Object -First 1)
-            $resolvedPython = if ($pythonLine) { $pythonLine.Substring(7).Trim() } else { $candidate.Exe }
-            $browserPath = if ($browserLine) { $browserLine.Substring(9).Trim() } else { "" }
-            return [pscustomobject]@{ PythonExe = $resolvedPython; ChromiumPath = $browserPath; Diagnostics = @($diagnostics) }
-        }
+    $probeEncoded = [Convert]::ToBase64String([System.Text.Encoding]::UTF8.GetBytes($probeCode))
+    $probeRunner = "import base64;exec(base64.b64decode('$probeEncoded'))"
+    $probe = Invoke-CapturedProcess -FilePath $lockedVenv -Arguments @("-c", $probeRunner, $lockedVenv) -TimeoutSeconds 60
+    if (-not $probe.Started -or $probe.ExitCode -ne 0) {
         $detail = (($probe.Stdout + " " + $probe.Stderr).Trim() -replace "`r?`n", " | ")
         if ([string]::IsNullOrWhiteSpace($detail)) { $detail = "probe exit $($probe.ExitCode)" }
-        $diagnostics.Add("[FAIL] $($candidate.Label) ($versionText): $detail")
+        throw @"
+Dedicated Skill .venv exists, but Playwright Chromium cannot launch.
+Runtime: $lockedVenv
+Probe:   $detail
+
+Repair with:
+  powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\install_dependencies_windows.ps1 -RecreateVenv
+"@
     }
 
-    $message = @(
-        "No Python interpreter with both Playwright and Playwright Chromium was found.",
-        "",
-        ($diagnostics -join "`n"),
-        "",
-        "Repair from the Skill source directory:",
-        "  powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\install_dependencies_windows.ps1",
-        "",
-        "Google Chrome is not required; this Skill uses Playwright Chromium."
-    ) -join "`n"
-    throw $message
+    $pythonLine = ($probe.Stdout -split "`r?`n" | Where-Object { $_ -like "PYTHON=*" } | Select-Object -First 1)
+    $browserLine = ($probe.Stdout -split "`r?`n" | Where-Object { $_ -like "CHROMIUM=*" } | Select-Object -First 1)
+    $pythonVersionLine = ($probe.Stdout -split "`r?`n" | Where-Object { $_ -like "PYTHON_VERSION=*" } | Select-Object -First 1)
+    $playwrightVersionLine = ($probe.Stdout -split "`r?`n" | Where-Object { $_ -like "PLAYWRIGHT_VERSION=*" } | Select-Object -First 1)
+    $runtime = [pscustomobject]@{
+        PythonExe = if ($pythonLine) { $pythonLine.Substring(7).Trim() } else { $lockedVenv }
+        PythonVersion = if ($pythonVersionLine) { $pythonVersionLine.Substring(15).Trim() } else { "unknown" }
+        PlaywrightVersion = if ($playwrightVersionLine) { $playwrightVersionLine.Substring(19).Trim() } else { "unknown" }
+        ChromiumPath = if ($browserLine) { $browserLine.Substring(9).Trim() } else { "" }
+        LaunchProbeOk = $true
+    }
+    try {
+        $runtimeDir = Join-Path $SkillRoot "output\runtime"
+        New-Item -ItemType Directory -Force -Path $runtimeDir | Out-Null
+        [ordered]@{
+            checked_at_utc = (Get-Date).ToUniversalTime().ToString("o")
+            python_executable = $runtime.PythonExe
+            python_version = $runtime.PythonVersion
+            playwright_version = $runtime.PlaywrightVersion
+            chromium_executable = $runtime.ChromiumPath
+            launch_probe_ok = $true
+            runtime_authority = "skill_venv_only"
+        } | ConvertTo-Json -Depth 6 | Set-Content -Encoding UTF8 -LiteralPath (Join-Path $runtimeDir "python_environment.json")
+    } catch {}
+    return $runtime
 }
 
 function Read-JsonFile([string]$Path) {
@@ -168,7 +165,20 @@ function Read-JsonFile([string]$Path) {
 function Write-JsonFile([string]$Path, [object]$Value) {
     $parent = Split-Path -Parent $Path
     if ($parent) { New-Item -ItemType Directory -Force -Path $parent | Out-Null }
-    $Value | ConvertTo-Json -Depth 16 | Set-Content -Encoding UTF8 -LiteralPath $Path
+    $sessionPart = ""
+    try { $sessionPart = [string]$Value.session_id } catch {}
+    if ([string]::IsNullOrWhiteSpace($sessionPart)) { $sessionPart = [Guid]::NewGuid().ToString("N") }
+    $tmp = "$Path.tmp.$sessionPart"
+    $json = $Value | ConvertTo-Json -Depth 16
+    $utf8NoBom = New-Object System.Text.UTF8Encoding -ArgumentList $false
+    [System.IO.File]::WriteAllText($tmp, $json, $utf8NoBom)
+    try {
+        [System.IO.File]::Replace($tmp, $Path, $null, $true)
+    } catch {
+        Move-Item -LiteralPath $tmp -Destination $Path -Force
+    } finally {
+        Remove-Item -LiteralPath $tmp -Force -ErrorAction SilentlyContinue
+    }
 }
 
 function Get-ProcessIdentity([int]$ProcessId) {
@@ -180,11 +190,17 @@ function Get-ProcessIdentity([int]$ProcessId) {
         if ([string]::IsNullOrWhiteSpace($path)) {
             try { $path = [string]$proc.MainModule.FileName } catch {}
         }
+        $commandLine = ""
+        try {
+            $cim = Get-CimInstance Win32_Process -Filter ("ProcessId = {0}" -f $ProcessId) -ErrorAction Stop
+            if ($cim) { $commandLine = [string]$cim.CommandLine }
+        } catch {}
         return [pscustomobject]@{
             process_id = [int]$proc.Id
             process_name = [string]$proc.ProcessName
             process_path = $path
             process_start_ticks = [int64]$proc.StartTime.ToUniversalTime().Ticks
+            process_command_line = $commandLine
         }
     } catch {
         return $null
@@ -209,6 +225,12 @@ function Test-ProcessIdentity([object]$Control) {
         $currentFull = [System.IO.Path]::GetFullPath([string]$current.process_path)
         if (-not $expectedFull.Equals($currentFull, [System.StringComparison]::OrdinalIgnoreCase)) { return $false }
     } catch { return $false }
+
+    $commandLine = [string]$current.process_command_line
+    $sessionId = [string]$Control.session_id
+    if ([string]::IsNullOrWhiteSpace($commandLine) -or [string]::IsNullOrWhiteSpace($sessionId)) { return $false }
+    if ($commandLine -notlike "*cloud_phone_monitor.login_controller*") { return $false }
+    if ($commandLine -notlike "*$sessionId*") { return $false }
 
     return $true
 }
@@ -270,6 +292,15 @@ function Start-LoginSession {
     }
 
     $runtime = Resolve-PlaywrightPython
+    $protocolProbe = Invoke-CapturedProcess -FilePath $runtime.PythonExe -Arguments @(
+        "-c", "from cloud_phone_monitor.auth_session_contract import LOGIN_PROTOCOL_VERSION; print(LOGIN_PROTOCOL_VERSION)"
+    ) -TimeoutSeconds 15
+    if ($protocolProbe.ExitCode -ne 0) {
+        throw "Unable to read LOGIN_PROTOCOL_VERSION from the dedicated Skill runtime: $($protocolProbe.Stderr.Trim())"
+    }
+    $protocolLine = ($protocolProbe.Stdout -split "`r?`n" | Where-Object { $_.Trim() } | Select-Object -Last 1).Trim()
+    try { $protocolVersion = [int]$protocolLine } catch { throw "Invalid LOGIN_PROTOCOL_VERSION from Python runtime: $protocolLine" }
+
     $sessionId = [Guid]::NewGuid().ToString("D")
     $arguments = @(
         "-m", "cloud_phone_monitor.login_controller",
@@ -291,9 +322,14 @@ function Start-LoginSession {
         -RedirectStandardOutput $StdoutPath -RedirectStandardError $StderrPath -PassThru
 
     $identity = $null
-    for ($i = 0; $i -lt 20 -and $null -eq $identity; $i++) {
+    for ($i = 0; $i -lt 40 -and $null -eq $identity; $i++) {
         Start-Sleep -Milliseconds 100
-        $identity = Get-ProcessIdentity ([int]$process.Id)
+        $candidateIdentity = Get-ProcessIdentity ([int]$process.Id)
+        if ($null -eq $candidateIdentity) { continue }
+        $candidateCommand = [string]$candidateIdentity.process_command_line
+        if ($candidateCommand -like "*cloud_phone_monitor.login_controller*" -and $candidateCommand -like "*$sessionId*") {
+            $identity = $candidateIdentity
+        }
     }
     if ($null -eq $identity) {
         try { $process.Kill() } catch {}
@@ -301,7 +337,8 @@ function Start-LoginSession {
     }
 
     $control = [ordered]@{
-        schema_version = 2
+        schema_version = $protocolVersion
+        login_protocol_version = $protocolVersion
         session_id = $sessionId
         platform = $Platform
         skill_root = $SkillRoot
@@ -311,12 +348,13 @@ function Start-LoginSession {
         process_name = $identity.process_name
         process_path = $identity.process_path
         process_start_ticks = [string]$identity.process_start_ticks
+        process_command_line = $identity.process_command_line
         started_at_utc = (Get-Date).ToUniversalTime().ToString("o")
         state = "starting"
     }
     Write-JsonFile $ControlPath $control
 
-    $deadline = (Get-Date).AddSeconds(90)
+    $deadline = (Get-Date).AddSeconds(130)
     while ((Get-Date) -lt $deadline) {
         $statusValue = Read-JsonFile $StatusPath
         if ($null -ne $statusValue) {
@@ -345,7 +383,7 @@ function Start-LoginSession {
 
     if (Test-ProcessIdentity $control) { try { Stop-ManagedProcess $control } catch {} }
     $stderrTail = if (Test-Path $StderrPath) { (Get-Content $StderrPath -Tail 30) -join "`n" } else { "" }
-    throw "Local login browser did not become ready within 90 seconds.`n$stderrTail"
+    throw "Local login browser did not become ready within 130 seconds.`n$stderrTail"
 }
 
 function Complete-LoginSession {
@@ -364,11 +402,11 @@ function Complete-LoginSession {
     [System.IO.File]::WriteAllText($SignalPath, [string]$control.session_id, $utf8NoBom)
     Write-Host "Completion signal sent for session $($control.session_id). Verifying..."
 
-    $deadline = (Get-Date).AddMinutes(6)
+    $deadline = (Get-Date).AddMinutes(10)
     while ((Get-Date) -lt $deadline -and (Test-ProcessIdentity $control)) { Start-Sleep -Milliseconds 500 }
     if (Test-ProcessIdentity $control) {
         Stop-ManagedProcess $control
-        throw "Login verification timed out after 6 minutes."
+        throw "Login verification timed out after 10 minutes."
     }
 
     $final = Read-JsonFile $StatusPath
