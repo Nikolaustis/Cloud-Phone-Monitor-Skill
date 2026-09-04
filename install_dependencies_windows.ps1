@@ -2,7 +2,8 @@ param(
     [string]$SkillRoot = "",
     [switch]$InstallDashboardDependencies,
     [switch]$InstallDevDependencies,
-    [switch]$RecreateVenv
+    [switch]$RecreateVenv,
+    [string]$PythonVersion = ""
 )
 
 $ErrorActionPreference = "Stop"
@@ -60,7 +61,17 @@ function Invoke-CapturedProcess {
     }
 }
 
-function Get-BasePythonCandidates {
+$SupportedPythonMinors = @("3.12", "3.13", "3.14")
+
+function Assert-SupportedPythonRequest([string]$Version) {
+    if ([string]::IsNullOrWhiteSpace($Version)) { return }
+    if ($SupportedPythonMinors -notcontains $Version) {
+        throw "Unsupported -PythonVersion '$Version'. Supported CPython minors: $($SupportedPythonMinors -join ', ')."
+    }
+}
+
+function Get-BasePythonCandidates([string]$RequestedVersion = "") {
+    Assert-SupportedPythonRequest $RequestedVersion
     $items = New-Object System.Collections.Generic.List[object]
     $seen = @{}
     function Add-Candidate([string]$Exe, [string[]]$Prefix=@(), [string]$Label="") {
@@ -71,35 +82,65 @@ function Get-BasePythonCandidates {
         $items.Add([pscustomobject]@{Exe=$Exe;Prefix=@($Prefix);Label=$Label})
     }
 
-    foreach ($path in @("C:\Python314\python.exe", "C:\Python313\python.exe", "C:\Python312\python.exe")) {
-        if (Test-Path $path) { Add-Candidate $path @() $path }
-    }
-    foreach ($pattern in @(
-        (Join-Path $env:LOCALAPPDATA "Programs\Python\Python*\python.exe"),
-        (Join-Path $env:LOCALAPPDATA "Python\pythoncore-*\python.exe"),
-        (Join-Path $env:LOCALAPPDATA "Python\bin\python.exe")
-    )) {
-        Get-ChildItem -Path $pattern -File -ErrorAction SilentlyContinue | ForEach-Object {
-            Add-Candidate $_.FullName @() $_.FullName
-        }
-    }
+    # Prefer the active PATH interpreter when it is in the supported range so
+    # a machine that already uses Python 3.13/3.14 does not need an artificial
+    # downgrade. A requested version (used by CI/repro checks) is exact.
     $python = Get-Command python -ErrorAction SilentlyContinue
     if ($python) { Add-Candidate $python.Source @() "PATH python" }
+
+    $versions = if ([string]::IsNullOrWhiteSpace($RequestedVersion)) {
+        @("3.14", "3.13", "3.12")
+    } else {
+        @($RequestedVersion)
+    }
     $py = Get-Command py -ErrorAction SilentlyContinue
-    if ($py) { Add-Candidate $py.Source @("-3") "py -3" }
+    foreach ($version in $versions) {
+        $compact = $version.Replace(".", "")
+        if ($py) { Add-Candidate $py.Source @("-$version") "py -$version" }
+        foreach ($path in @(
+            "C:\Python$compact\python.exe",
+            (Join-Path $env:LOCALAPPDATA "Programs\Python\Python$compact\python.exe")
+        )) {
+            if (Test-Path $path) { Add-Candidate $path @() $path }
+        }
+        foreach ($pattern in @(
+            (Join-Path $env:LOCALAPPDATA "Programs\Python\Python$compact*\python.exe"),
+            (Join-Path $env:LOCALAPPDATA "Python\pythoncore-$version*\python.exe")
+        )) {
+            Get-ChildItem -Path $pattern -File -ErrorAction SilentlyContinue | ForEach-Object {
+                Add-Candidate $_.FullName @() $_.FullName
+            }
+        }
+    }
     return $items.ToArray()
 }
 
-function Resolve-BasePython {
-    foreach ($candidate in Get-BasePythonCandidates) {
-        $probe = Invoke-CapturedProcess -FilePath $candidate.Exe -Arguments (@($candidate.Prefix) + @("-c", "import sys; print(sys.executable); raise SystemExit(0 if sys.version_info >= (3,12) else 3)")) -TimeoutSeconds 20
+function Resolve-BasePython([string]$RequestedVersion = "") {
+    Assert-SupportedPythonRequest $RequestedVersion
+    foreach ($candidate in Get-BasePythonCandidates $RequestedVersion) {
+        $probeCode = if ([string]::IsNullOrWhiteSpace($RequestedVersion)) {
+            "import sys; v=f'{sys.version_info.major}.{sys.version_info.minor}'; print(sys.executable); raise SystemExit(0 if v in {'3.12','3.13','3.14'} else 3)"
+        } else {
+            "import sys; v=f'{sys.version_info.major}.{sys.version_info.minor}'; print(sys.executable); raise SystemExit(0 if v == '$RequestedVersion' else 3)"
+        }
+        $probe = Invoke-CapturedProcess -FilePath $candidate.Exe -Arguments (@($candidate.Prefix) + @("-c", $probeCode)) -TimeoutSeconds 20
         if ($probe.ExitCode -eq 0) {
             $resolved = ($probe.Stdout -split "`r?`n" | Where-Object {$_.Trim()} | Select-Object -Last 1).Trim()
             if ($resolved -and (Test-Path $resolved)) { return $resolved }
             return $candidate.Exe
         }
     }
-    throw "No runnable Python 3.12+ interpreter was found. Install Python 3.12+ and retry."
+    if ([string]::IsNullOrWhiteSpace($RequestedVersion)) {
+        throw "No supported CPython 3.12-3.14 interpreter was found. Install one of these versions and retry. Python 3.12 remains the recommended release baseline."
+    }
+    throw "Requested Python $($RequestedVersion).x was not found. Install it or omit -PythonVersion to use any supported CPython 3.12-3.14 interpreter."
+}
+
+function Get-PythonMinor([string]$Exe) {
+    if (!(Test-Path -LiteralPath $Exe)) { return "" }
+    $value = (& $Exe -B -c "import sys; print(f'{sys.version_info.major}.{sys.version_info.minor}')").Trim()
+    if ($LASTEXITCODE -ne 0) { return "" }
+    return $value
 }
 
 function Invoke-Checked {
@@ -124,17 +165,26 @@ foreach ($path in $required) {
 
 $VenvRoot = Join-Path $SkillRoot ".venv"
 $VenvPython = Join-Path $VenvRoot "Scripts\python.exe"
-$BasePython = Resolve-BasePython
-Write-Host "Base Python: $BasePython"
-Write-Host "Dedicated runtime: $VenvPython"
+Assert-SupportedPythonRequest $PythonVersion
 
 if ($RecreateVenv -and (Test-Path $VenvRoot)) {
     Remove-Item -LiteralPath $VenvRoot -Recurse -Force
 }
 if (!(Test-Path $VenvPython)) {
+    $BasePython = Resolve-BasePython $PythonVersion
+    Write-Host "Base Python: $BasePython"
     Invoke-Checked $BasePython @("-m", "venv", $VenvRoot) "Create dedicated .venv"
 }
 if (!(Test-Path $VenvPython)) { throw "Virtual environment creation did not produce: $VenvPython" }
+
+$VenvMinor = Get-PythonMinor $VenvPython
+if ($SupportedPythonMinors -notcontains $VenvMinor) {
+    throw "Existing .venv uses unsupported Python $VenvMinor. Re-run with -RecreateVenv using CPython 3.12, 3.13, or 3.14."
+}
+if (-not [string]::IsNullOrWhiteSpace($PythonVersion) -and $VenvMinor -ne $PythonVersion) {
+    throw "Existing .venv uses Python $VenvMinor but -PythonVersion $PythonVersion was requested. Re-run with -RecreateVenv."
+}
+Write-Host "Dedicated runtime: $VenvPython (Python $($VenvMinor).x)"
 
 Invoke-Checked $VenvPython @("-m", "pip", "install", "--upgrade", "pip") "Upgrade .venv pip"
 $RuntimeConstraints = Join-Path $SkillRoot "constraints-runtime.txt"
@@ -181,7 +231,15 @@ if ($InstallDashboardDependencies) {
     if (!(Test-Path $packageJson)) { throw "Dashboard package.json missing: $packageJson" }
     $npm = Get-Command npm.cmd -ErrorAction SilentlyContinue
     if (-not $npm) { $npm = Get-Command npm -ErrorAction SilentlyContinue }
-    if (-not $npm) { throw "npm was not found. Install Node.js/npm or omit -InstallDashboardDependencies." }
+    if (-not $npm) { throw "npm was not found. Install Node.js 22 or 24 with npm, or omit -InstallDashboardDependencies." }
+    $node = Get-Command node.exe -ErrorAction SilentlyContinue
+    if (-not $node) { $node = Get-Command node -ErrorAction SilentlyContinue }
+    if (-not $node) { throw "node was not found. Install Node.js 22.x or 24.x." }
+    $nodeVersion = (& $node.Source --version).Trim()
+    if ($LASTEXITCODE -ne 0 -or $nodeVersion -notmatch '^v(22|24)\.') {
+        throw "Unsupported Node.js version: $nodeVersion. Supported majors are Node.js 22.x and 24.x; Node 22 remains the recommended baseline."
+    }
+    if ($nodeVersion -match '^v24\.') { Write-Warning "Using supported Node.js 24.x compatibility runtime; primary release baseline remains Node.js 22.x." }
     $oldLocation = Get-Location
     try {
         Set-Location (Join-Path $SkillRoot "dashboard")

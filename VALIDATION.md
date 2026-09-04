@@ -1,140 +1,78 @@
-# Data Quality and Validation
+# Validation
 
-Cloud Phone Baseline Price Monitor 在采集、历史重建和 Dashboard 生成过程中会进行多层数据质量检查。
-
-## 登录与访问检查
-
-采集前应确认平台处于可访问状态。
-
-用于自动采集的登录必须来自 `LOGIN.ps1` 启动的**本机 Playwright Chromium**。ChatGPT Work / Cloud Browser 的会话不能作为本机采集器的认证来源。
-
-### 登录预检修复
-
-人工 PowerShell 修复：
+## Base runtime
 
 ```powershell
-.\LOGIN.ps1 UgPhone
-.\LOGIN.ps1 VSPhone
-.\LOGIN.ps1 Redfinger
-.\LOGIN.ps1 LDCloud
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\RUN_TESTS.ps1
 ```
 
-当本地 Agent 具备 Windows shell 执行能力时，应按两阶段协议修复：
+Expected coverage includes authentication/session contracts, profile locking, release policy, collector/data behavior and Windows PowerShell smoke tests.
+
+## AI layer
 
 ```powershell
-.\LOGIN.ps1 UgPhone -Start
-# 用户在本机 Chromium 登录，并在聊天回复“已完成”后：
-.\LOGIN.ps1 UgPhone -Complete
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\RUN_AI_TESTS.ps1
 ```
 
-`-Start` 必须返回 `LOGIN_AGENT_STATE=WAITING_FOR_USER`；`-Complete` 成功必须返回 `LOGIN_AGENT_STATE=SAVED_AND_VERIFIED`。如果本地 shell 不可用，应停止自动认证，不得改用 Cloud Browser。
+The AI test layer verifies:
 
-可使用：
+- `ai-context-v2` normalization and stable fact IDs;
+- deterministic query/compare/pairing/history/What-if tools;
+- explicit abstention for unsupported entities;
+- Dashboard Copilot integration and absence of provider credentials in frontend source;
+- bundled synthetic benchmark routing, evidence and numeric retrieval.
+
+The bundled benchmark is not a production LLM quality claim.
+
+## Manual AI context check
 
 ```powershell
-.\LOGIN.ps1 UgPhone -Status
-.\LOGIN.ps1 UgPhone -Cancel
+.\.venv\Scripts\python.exe -B .\build_ai_context.py --data-dir .\demo\dashboard_data --output-dir .\demo\ai_context
+.\.venv\Scripts\python.exe -B .\evals\run_eval.py
 ```
 
-检查或取消遗留的两阶段会话。取消操作不得删除此前已经保存的正式登录态。
+`demo/ai_context/manifest.json` must report `schema_version = ai-context-v2`.
 
-UgPhone 的正常本地认证基线包括 `ugphone_state.json`、`ugphone_profile/`，并在可用时加载短期 `ugphone_runtime_context.json`。预检会进一步尝试以计划任务等价的 headless persistent profile 验证购买页。两阶段会话临时控制文件 `<platform>_login_agent_session.json` 只用于本地进程编排，成功或取消后应被删除。
+## Optional API contract
 
-以下情况通常会被视为严重问题：
+After installing `requirements-ai.txt`:
 
-- 登录状态失效
-- 本地登录状态缺失或为空
-- 两阶段 Agent 登录进程提前退出或控制文件与进程不一致
-- UgPhone persistent profile 无法在计划任务/headless 环境恢复
-- CAPTCHA / 验证码阻断
-- 401 / 403 等访问错误
-- 页面被反爬或区域限制完全阻断
-- 平台返回 0 条有效产品记录
+```powershell
+.\.venv\Scripts\python.exe -B -c "from ai_backend.app import app; print(app.title, app.version)"
+```
 
-## 产品记录完整性
+The service version for this beta line is `2.0.0-beta.1`.
 
-产品记录会尽量保留以下信息：
+## Release contract
 
-- 平台
-- 套餐 / SKU
-- Android 版本
-- CPU
-- RAM
-- Storage
-- 支持地区
-- 购买时长
-- 当前价格
-- 订阅模式
-- 库存 / 可售状态
+```powershell
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\PREPARE_RELEASE.ps1
+```
 
-无法确认的字段应留空或标记为未知，不应猜测补全。
+Only a clean staging tree with a regenerated and revalidated `MANIFEST_SHA256.txt` should be used as the GitHub public-release baseline.
 
-## 当前值与历史值
+## Git-tracked public-tree gate
 
-系统区分：
+`.gitignore` is not a security boundary. Before public upload, CI runs:
 
-- `current_observed`：本轮真实采集
-- `carry_forward`：沿用最近一次真实观测
-- `baseline_reference`：baseline 参考
-- 其他不可售、下架、不适用或未知状态
+```bash
+python -B tools/validate_git_tracked_files.py .
+```
 
-临时采集缺失不会自动等同于下架。
+against `git ls-files`. This rejects tracked files outside the canonical public allowlist and scans tracked text for conservative credential patterns. A simulated tracked `output/auth/*` file or obvious token must fail the test suite.
 
-## 部分覆盖
+## Service identity gate
 
-如果一个平台仍有有效数据，但某些套餐、Android 版本或地区本轮未完整采集，通常记录为覆盖不足或警告。
+FastAPI `/health` exposes an ephemeral launch token, service PID, instance id and AI data revision. `START_DEMO.ps1` and `VERIFY_V2.ps1` require all of them to match the process and context started by the current run. An already occupied port or stale API process is therefore a hard failure rather than a false PASS.
 
-这类情况与以下严重故障不同：
+## Runtime versions
 
-- 平台完全无记录
-- 登录/认证失败
-- 数据文件损坏
-- 历史文件无法解析
+The release gate accepts CPython 3.12-3.14 and Node.js 22 or 24, while Python 3.12 + Node 22 remains the recommended baseline. Every accepted runtime must still pass pinned dependency installation, Playwright 1.62.0 Chromium launch, tests, AI/API contract and Dashboard build. See `runtime-versions.json`.
 
-## Dashboard 数据检查
+## Real collector acceptance
 
-生成 Dashboard 时会检查关键数据文件是否存在并可解析，包括：
+`VERIFY_REAL_COLLECTORS.ps1` is a maintainer-only gate that requires private platform login state. It verifies live auth, collects all four platforms, checks that each platform produced records, rebuilds the AI context and rebuilds the Dashboard. This is the evidence required to say the live collector path was revalidated; public CI does not and should not possess these credentials.
 
-- 价格概览
-- 配对矩阵
-- 同周期价格比较
-- 价格趋势
-- 商品文本变化
-- 指标定义
-- 调度/平台状态
+### Demo runtime deletion safety
 
-长期历史可使用 gzip 压缩文件保存。压缩文件必须能够正常解压并解析为 JSON。
-
-## Redfinger 特殊校验
-
-Redfinger 价格 SKU 必须来自有效价格接口，或同时包含价格与购买时长的可见套餐卡片。
-
-以下内容不能单独作为产品价格：
-
-- 游戏推荐
-- 钱包余额
-- 导航文字
-- 加载骨架
-- 只有套餐名称而没有价格/时长的元素
-
-## VSPhone 特殊校验
-
-VSPhone 采集订阅和非订阅价格时：
-
-- 数量保持为 1
-- 读取套餐卡价格
-- 不读取订单页总计
-- 不点击最终创建/下单按钮
-- 非订阅模式仅采集支持的购买周期
-
-## 安全原则
-
-系统不应为了获取价格而执行：
-
-- 下单
-- 支付
-- 创建实例
-- 自动续费确认
-- 购买确认
-
-任何可能产生真实交易的按钮都不属于正常采集流程。
+`tools/prepare_demo_runtime.py` refuses the repository root, its ancestors, arbitrary source subtrees, the OS/CI temp root itself, and any pre-existing external temp directory that does not carry this project's `demo-runtime-v1` ownership marker. This prevents a typo from turning demo cleanup into a broad recursive delete.

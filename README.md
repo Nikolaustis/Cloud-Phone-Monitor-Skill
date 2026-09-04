@@ -1,217 +1,336 @@
-# Cloud Phone Baseline Price Monitor
+# Cloud Phone Pricing Intelligence Platform
 
-面向 **UgPhone、VSPhone、Redfinger、LDCloud** 的云手机价格监测与竞品分析 Skill。项目将 Playwright 采集、登录态持久化、基准价监测、同周期竞品比较和只读 Dashboard 组合为一套可重复部署的本地工作流。
+**AI-powered competitive pricing monitoring and decision-support system** for UgPhone, VSPhone, Redfinger and LDCloud.
 
-> 本仓库只包含源码与公开配置模板。登录态、Cookie、Token、浏览器 profile、私有 baseline、运行日志和发布凭据均不属于公开源码。
+This repository evolves the original Cloud Phone Pricing Monitor into a complete pricing-intelligence project: Playwright collection, normalized product semantics, configuration matching, historical monitoring, a React Dashboard, deterministic pricing tools, evidence-grounded AI explanation and pricing What-if simulation.
 
-## 核心能力
+**Repository:** `Nikolaustis/Cloud-Phone-Pricing-Monitor`  
+**Live Dashboard:** https://nikolaustis.github.io/Cloud-Phone-Price-Dashboard-Site/  
+**AI release line:** `v2.0.0-beta.1` → `v2.0.0`
 
-- **多平台价格采集**：统一整理套餐、配置、Android 版本、地区、购买周期、价格、库存和促销信息。
-- **基准价监测**：比较当前观测值、上次有效观测与 baseline，识别涨跌、缺失和促销文案变化。
-- **同周期竞品比较**：按购买时长和近似配置比较 UgPhone 与竞品价格。
-- **订阅 / 非订阅区分**：UgPhone、VSPhone 显式区分自动续费开启与关闭的价格状态。
-- **本地登录态持久化**：使用本机 Playwright Chromium 建立 collector authentication；不依赖系统 Chrome。
-- **会话安全**：两阶段登录使用 UUID session、pending 状态、重新打开验证和事务式文件提交。
-- **Persistent profile 互斥**：UgPhone 登录、登录预检和 canonical collector 共用 profile lock，避免并发打开同一 Chromium profile。
-- **只读 Dashboard**：展示价格、趋势、配置配对、变价和文本变化，不从前端触发采集或购买行为。
-- **公开发布防泄漏**：GitHub release 使用显式 allowlist staging，而不是直接打包开发工作区。
+> The numeric decision layer remains deterministic. An LLM may understand a question, choose tools and explain results, but it is not the authority for prices, medians, similarity scores, relative indexes or market-position thresholds.
 
-## 架构概览
+## Core capabilities
+
+- **Multi-platform Playwright collection** with local persisted authentication.
+- **Normalized pricing semantics** for configuration, region, duration and purchase mode.
+- **Historical intelligence**: current/previous/baseline price, carry-forward semantics and trend assets.
+- **Comparable configuration matching** using Android, CPU, RAM, storage, region and duration evidence.
+- **Pricing decision engine**: competitor median, UgPhone relative index, market position, alerts and reason codes.
+- **React/Vite Dashboard** for overview, pairing, duration comparison, trends, changes and metrics.
+- **AI Semantic Context** derived only from already-safe Dashboard data.
+- **Ask Pricing Copilot** using deterministic query tools plus optional LLM orchestration.
+- **AI Explain** with configuration/pairing evidence and data-origin caveats.
+- **Pricing What-if** calculated in Python/JavaScript rules, never estimated by a model.
+- **Evidence grounding** with stable `fact_id`, evidence IDs, data date and data revision.
+- **AI Evaluation** covering routing, numeric exact match, grounding and correct abstention.
+- **Public Evidence Mode** that works on GitHub Pages without exposing an API key.
+
+## Architecture
 
 ```text
-LOGIN.ps1 / run.py
-        ↓
-专用 .venv + session/profile guards
-        ↓
-Playwright Chromium
-        ↓
-平台 scraper / auth verifier
-        ↓
-output/（本地私有运行数据）
-        ↓
-历史重建 / Dashboard 导出
+UgPhone / VSPhone / Redfinger / LDCloud
+                 │
+                 ▼
+        Playwright collectors
+                 │
+                 ▼
+Normalization / validation / history
+                 │
+                 ▼
+Configuration matching + pricing rules
+                 │
+        ┌────────┴────────┐
+        ▼                 ▼
+ dashboard_data      AI Context Builder
+        │                 │
+        ▼                 ▼
+ React Dashboard   dashboard_data/ai
+        │            │            │
+        │            │            └── Evidence Mode on GitHub Pages
+        │            ▼
+        │       FastAPI AI Service
+        │            │
+        │       deterministic tools
+        │            │
+        │       optional LLM provider
+        └────────────┴──────────────► Pricing Intelligence Copilot
 ```
 
-进一步说明：
+See:
 
-- [架构说明](docs/ARCHITECTURE.md)
-- [认证与登录态设计](docs/AUTHENTICATION_DESIGN.md)
-- [公开发布流程](docs/RELEASE_PROCESS.md)
-- [安全策略](SECURITY.md)
-- [贡献说明](CONTRIBUTING.md)
+- [Architecture](docs/ARCHITECTURE.md)
+- [AI architecture](docs/AI_ARCHITECTURE.md)
+- [Authentication design](docs/AUTHENTICATION_DESIGN.md)
+- [AI evaluation](docs/AI_EVALUATION.md)
+- [AI deployment](docs/AI_DEPLOYMENT.md)
+- [Release process](docs/RELEASE_PROCESS.md)
+- [v2 release line](docs/V2_RELEASE.md)
 
-## 支持平台
+## Windows quick start
 
-| Platform | 主要采集内容 | 登录态主要形式 |
-|---|---|---|
-| UgPhone | 套餐、Android、地区、购买周期、订阅/非订阅价格 | persistent profile + storage state + runtime context |
-| VSPhone | 套餐、配置、购买周期、订阅/非订阅价格 | Playwright storage state |
-| Redfinger | 套餐、Android、地区、有效价格 SKU | Playwright storage state |
-| LDCloud | 套餐、配置、地区、购买周期、价格 | Playwright storage state |
-
-## Windows 快速开始
-
-### 1. 安装 Skill
+### Base runtime
 
 ```powershell
-powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\INSTALL.ps1
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\INSTALL.ps1 -InstallDependencies
 ```
 
-新机器同时建立专用 Python / Playwright 运行环境：
-
-```powershell
-powershell.exe -NoProfile -ExecutionPolicy Bypass `
-  -File .\INSTALL.ps1 -InstallDependencies
-```
-
-也可以只安装 Python/Playwright 依赖：
-
-```powershell
-powershell.exe -NoProfile -ExecutionPolicy Bypass `
-  -File .\install_dependencies_windows.ps1
-```
-
-正式运行时固定为：
+The canonical runtime is:
 
 ```text
 <SkillRoot>\.venv\Scripts\python.exe
 ```
 
-系统 Google Chrome 不是必需项；安装脚本会安装与 Python Playwright 配套的 Chromium，并执行一次 headless launch probe。
+Collector login uses the local Playwright Chromium opened by `LOGIN.ps1`. ChatGPT Work / Cloud Browser authentication is not interchangeable with local collector state.
 
-### 2. 建立本地登录态
-
-人工 PowerShell：
+### Optional AI service dependencies
 
 ```powershell
-powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\LOGIN.ps1 UgPhone
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\install_ai_dependencies_windows.ps1
 ```
 
-Agent 两阶段登录：
+The same optional layer can be installed with the base installer:
 
 ```powershell
-powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\LOGIN.ps1 UgPhone -Start
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\INSTALL.ps1 -InstallDependencies -InstallAIDependencies
 ```
 
-在脚本打开的**本机 Chromium** 中完成登录后：
+Build the safe semantic context:
 
 ```powershell
-powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\LOGIN.ps1 UgPhone -Complete
+.\.venv\Scripts\python.exe -B .\build_ai_context.py
 ```
 
-只有当前 session 完成验证后才会输出：
+Start the optional FastAPI AI service:
+
+```powershell
+.\.venv\Scripts\python.exe -B .\run_ai_api.py
+```
+
+Default local endpoint:
 
 ```text
-LOGIN_AGENT_STATE=SAVED_AND_VERIFIED
+http://127.0.0.1:8787
 ```
 
-ChatGPT Work / Cloud Browser 的远程浏览器会话不能作为本地 collector 登录态来源。
+## Dashboard AI modes
 
-### 3. 采集
+### Evidence Mode — public/demo default
 
-使用 canonical 入口：
-
-```powershell
-.\.venv\Scripts\python.exe .\run.py
-```
-
-单平台：
-
-```powershell
-.\.venv\Scripts\python.exe .\run.py --platform UgPhone
-```
-
-首次确认数据正确后初始化 baseline：
-
-```powershell
-.\.venv\Scripts\python.exe .\run.py --init-baseline
-```
-
-## Dashboard
-
-本地开发：
-
-```bash
-cd dashboard
-npm ci
-npm run dev
-```
-
-历史重建：
-
-```powershell
-.\.venv\Scripts\python.exe .\rebuild_dashboard_history.py --incremental
-```
-
-Dashboard 是只读业务界面，不包含下单、购买、支付、续费或创建云手机实例的操作。
-
-## 认证安全模型
-
-登录成功不等价于“网页能打开”或“存在 Cookie”。验证要求至少包括认证证据和业务页面证据。
-
-UgPhone 以 persistent profile 为长期主要认证权威，同时保存：
+If `VITE_AI_API_BASE_URL` is blank, the Dashboard Copilot reads static safe assets under:
 
 ```text
-output/auth/ugphone_profile/
-output/auth/ugphone_state.json
-output/auth/ugphone_runtime_context.json
+dashboard_data/ai/
 ```
 
-新的 storage/runtime 文件先写入 session-specific pending 路径，验证成功后才提交。Persistent Chromium profile 本身不能参与普通多文件事务，因此通过重新打开验证和跨流程互斥降低并发风险。
+It supports market brief, structured configuration queries, price changes, Explain, What-if and explicit abstention. No provider secret is required, so this mode is safe for GitHub Pages.
 
-## 测试
+### LLM backend mode
 
-```powershell
-powershell.exe -NoProfile -ExecutionPolicy Bypass `
-  -File .\install_dependencies_windows.ps1 -InstallDevDependencies
+The backend can optionally use an **operator-configured OpenAI-compatible chat-completions endpoint**. No vendor/model is hard-coded in the repository.
 
-powershell.exe -NoProfile -ExecutionPolicy Bypass `
-  -File .\RUN_TESTS.ps1
-```
-
-GitHub Actions 同时覆盖：
-
-- Linux：Python 行为测试、公开文件策略、staging、Manifest 一致性。
-- Windows：专用 `.venv`、Playwright Chromium launch probe、Windows PowerShell 状态机 smoke test。
-
-## 公开发布
-
-不要直接把整个开发工作目录上传到 GitHub。Canonical release：
-
-```powershell
-powershell.exe -NoProfile -ExecutionPolicy Bypass `
-  -File .\PREPARE_RELEASE.ps1
-```
-
-流程：
+Backend-only environment variables:
 
 ```text
-测试
-→ explicit allowlist staging
-→ deployment_contract 公共字段净化
-→ staged-source 校验
-→ deterministic Manifest
-→ Manifest 二次校验
-→ deterministic public ZIP
+AI_ENABLE_LLM=1
+AI_LLM_PROVIDER=openai_compatible
+AI_LLM_ENDPOINT=...
+AI_LLM_API_KEY=...
+AI_LLM_MODEL=...
 ```
 
-`tools/public_release_policy.py` 是公开文件范围的单一权威来源。公开 staging 不包含 `.venv/`、`output/`、baselines、日志、profile、登录态、私有部署脚本或本地发布配置。Release 工具统一禁止写入 Python bytecode，ZIP 构建器也只接受 allowlist 文件和已验证 Manifest；任何 `__pycache__`、`.pyc` 或其他 staging 污染都会 fail-closed。
+The frontend receives only `VITE_AI_API_BASE_URL`. Provider keys must never be placed in `VITE_*` variables or browser JavaScript.
 
-## 数据与隐私
+## Deterministic AI tool layer
 
-以下内容必须保留在本地：
+The service exposes a compact stable tool set:
 
 ```text
-output/
+get_market_overview
+search_configs
+compare_configuration
+get_pairing_evidence
+get_price_changes
+get_price_history
+get_metric_definition
+simulate_price
+```
+
+The intended flow is:
+
+```text
+user question
+→ semantic/tool routing
+→ deterministic query/calculation
+→ compact evidence
+→ optional LLM explanation
+→ answer + evidence + data revision
+```
+
+This is intentionally not “send several MB of JSON to a chatbot”.
+
+## AI context contract
+
+`build_ai_context.py` derives an AI semantic layer from already-safe Dashboard exports:
+
+```text
+dashboard/public/dashboard_data/ai/
+├── manifest.json
+├── market_summary.json
+├── config_index.json
+├── price_events.json
+├── pairing_index.json
+├── trend_index.json
+├── metric_dictionary.json
+├── question_examples.json
+└── market_brief.txt
+```
+
+Every normalized fact carries a stable `fact_id` where applicable. AI answers return evidence records plus `data_date` and `data_revision`, so a polished explanation cannot silently override the underlying structured data.
+
+## Explainable pricing What-if
+
+Example logic:
+
+```text
+proposed_price / competitor_median × 100
+        ↓
+new relative index
+        ↓
+new market position
+```
+
+Market-position thresholds remain deterministic:
+
+```text
+index < 90       → below_market
+90–105           → competitive
+>105–115         → slightly_high
+>115              → high
+```
+
+The What-if tool holds competitor evidence constant at the current data revision and changes only the proposed UgPhone price.
+
+## AI evaluation
+
+Run:
+
+```powershell
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\RUN_AI_TESTS.ps1
+```
+
+The included synthetic demo benchmark currently contains **21 golden questions** and validates deterministic routing, evidence coverage, abstention and numeric retrieval. The generated `evals/demo_report.json` is explicitly a **tool-layer demo benchmark**, not a production LLM score.
+
+Current synthetic deterministic benchmark generated by this package:
+
+```text
+Cases                 21
+Intent accuracy       100%
+Evidence coverage     100%
+Abstention accuracy   100%
+Numeric accuracy      100%
+```
+
+Do not put these numbers on a resume as production AI quality. For a real portfolio benchmark, evaluate safe real Dashboard rows and additionally report unsupported-claim rate, P50/P95 latency, provider/model revision and token/cost metrics.
+
+## Demo dataset
+
+`demo/dashboard_data/` is synthetic and contains no account/authentication information. `demo/ai_context/` is a prebuilt semantic context so recruiters or reviewers can exercise the AI layer without logging into cloud-phone platforms.
+
+## Daily pipeline
+
+The Windows updater is extended to:
+
+```text
+login preflight
+→ collection
+→ history rebuild
+→ AI context build
+→ Dashboard build
+→ validation
+→ optional GitHub Pages publish
+```
+
+The AI service is a separate read-only consumer of safe exported data. It cannot trigger collection, modify authentication, initialize a baseline or execute a purchase.
+
+## Public/private boundary
+
+Never publish:
+
+```text
+output/auth/
 baselines/
 .venv/
 publisher.local.json
+.env
+AI provider keys
+Playwright profiles/storage state
 ```
 
-尤其不要公开：Cookie、Token、Playwright storage state、Chromium profile、runtime context、账号信息、未脱敏诊断数据和具体私有 Git remote。
+The GitHub Pages deployment repository should remain a static deployment target. Source code, AI backend, evaluation and Dashboard source belong in this main repository.
 
-详见 [DEPLOYMENT_DATA_GUIDE.md](DEPLOYMENT_DATA_GUIDE.md)。
+## Portfolio framing
+
+See [PROJECT_PORTFOLIO.md](PROJECT_PORTFOLIO.md). The recommended project name on a resume is:
+
+> **Cloud Phone Pricing Intelligence Platform｜AI 云手机竞品价格监测与定价决策平台**
 
 ## Disclaimer
 
-本项目用于价格监测、数据整理和业务分析。使用者应自行确保采集和账号操作符合目标平台服务条款、账号规则及适用法律法规。
+This project is for price monitoring, data organization and business analysis. Use it in accordance with relevant website terms, account rules and applicable laws.
+
+## Reproducible public runtime contract
+
+The recommended release baseline remains explicit, but newer supported runtimes are not rejected merely for having a higher version:
+
+```text
+Recommended: Python 3.12.x + Node.js 22.x + Playwright 1.62.0
+Supported:   Python 3.12.x / 3.13.x / 3.14.x
+             Node.js 22.x / 24.x
+```
+
+A supported version is accepted only if dependency installation, tests, Chromium launch, AI/API contract and Dashboard build all pass. Python 3.14 compatibility uses `pandas==2.3.3`, which has CPython 3.14 wheels; `.python-version` and `.nvmrc` remain recommendations, not hard upper bounds.
+
+The versions are recorded in `runtime-versions.json`, `.python-version` and `.nvmrc`. Direct Python dependencies are pinned; Dashboard dependencies are reproduced with `dashboard/package-lock.json` + `npm ci`.
+
+A clean Windows machine is release-ready only after:
+
+```powershell
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\VERIFY_V2.ps1 -Bootstrap
+```
+
+returns `RELEASE_READY=True`. The verifier launches Chromium, runs base/AI tests, rebuilds a synthetic safe dataset, starts a uniquely identified FastAPI process, verifies the expected `ai-context-v2` revision, builds the Dashboard and reproduces the public release Manifest.
+
+### Local AI configuration
+
+For optional LLM orchestration:
+
+```powershell
+Copy-Item .\ai.env.example .\ai.env
+notepad .\ai.env
+.\.venv\Scripts\python.exe .\run_ai_api.py
+```
+
+`ai.env` is loaded automatically by the backend; process environment variables take precedence. It is private, ignored by Git and rejected by the public release policy. Evidence Mode remains usable without any provider key.
+
+### Git-tracked secret gate
+
+CI validates the actual Git index with `tools/validate_git_tracked_files.py`. A committed `output/`, `baselines/`, authentication artifact, forbidden archive, private maintainer file or obvious credential token fails CI even if `.gitignore` or working-tree validation would otherwise hide it.
+
+### Moving to another computer
+
+See [MIGRATION_GUIDE.md](MIGRATION_GUIDE.md). Public source, private historical/baseline data, authentication state and local publishing configuration are deliberately migrated through separate paths.
+
+## License
+
+This repository is released under the [MIT License](LICENSE).
+
+### Maintainer-only live collector acceptance
+
+Portable CI cannot prove third-party login sessions. Before claiming that the real collectors were revalidated on a machine with private credentials, run:
+
+```powershell
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\VERIFY_REAL_COLLECTORS.ps1
+```
+
+This performs live auth preflight, the canonical four-platform collection, live AI-context rebuild and Dashboard build. A full pass emits `REAL_COLLECTOR_READY=True`. It is intentionally separate from public CI and from the credential-free synthetic demo gate.

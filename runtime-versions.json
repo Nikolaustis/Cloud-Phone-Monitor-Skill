@@ -1,0 +1,31 @@
+{
+  "schema_version": 2,
+  "recommended_runtime": {
+    "python": "3.12.x",
+    "node": "22.x",
+    "playwright": "1.62.0"
+  },
+  "supported_runtime": {
+    "python": [
+      "3.12.x",
+      "3.13.x",
+      "3.14.x"
+    ],
+    "node": [
+      "22.x",
+      "24.x"
+    ],
+    "playwright": "1.62.0"
+  },
+  "compatibility_policy": {
+    "python": ">=3.12,<3.15",
+    "node": "22.x || 24.x",
+    "behavior": "Supported versions must still pass dependency installation, tests, Chromium launch, AI/API contract, and Dashboard build."
+  },
+  "notes": [
+    "Python 3.12 + Node 22 remains the recommended and primary release baseline.",
+    "CI also exercises Python 3.13/3.14 dependency and test compatibility, plus Windows Python 3.14 + Node 24.",
+    "pandas 2.3.3 is pinned because it publishes CPython 3.14 wheels, unlike the previous pandas 2.2.3 pin.",
+    "Dashboard dependencies are reproduced by dashboard/package-lock.json and npm ci."
+  ]
+}

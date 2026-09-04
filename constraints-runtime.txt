@@ -1,2 +1,4 @@
-# Playwright package/browser pairing is intentionally pinned for reproducible Windows installs.
+# Recommended CI baseline: Python 3.12.x; supported CPython minors are 3.12-3.14 (see runtime-versions.json).
+# Direct project dependencies are pinned in requirements*.txt; this constraint
+# additionally guarantees the Playwright package/browser pairing.
 playwright==1.62.0

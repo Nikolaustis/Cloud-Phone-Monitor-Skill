@@ -1,26 +1,32 @@
-# cloud-phone-baseline-price-monitor
+# cloud-phone-pricing-intelligence
 
 ## Purpose
 
-Use this skill when the user needs cloud phone product and price monitoring for UgPhone, VSPhone, Redfinger, and LDCloud.
+Use this skill for cloud-phone product/price monitoring and evidence-grounded pricing intelligence across UgPhone, VSPhone, Redfinger, and LDCloud.
 
-The workflow has two main analytical layers:
+The system has four analytical layers:
 
-1. Same-product baseline monitoring: compare current product rows against a private baseline workbook.
-2. UgPhone-based comparable configuration monitoring: pair nearby competitor configurations, normalize purchase durations, apply rule-based quality adjustment, and compare market position.
+1. **Collection**: authenticated, non-purchasing price/data collection with local Playwright Chromium.
+2. **Normalization and history**: stable product semantics, explicit collection states, baseline and historical price intelligence.
+3. **Comparable pricing**: UgPhone-based configuration matching, competitor median, relative index and market-position logic.
+4. **AI decision support**: a safe semantic context, deterministic query/calculation tools, evidence-grounded explanation and pricing What-if.
 
-Do not compare platform package names alone. VIP/KVIP/SVIP/XVIP names are platform-specific and may represent different configuration tiers.
+Do not compare platform package names alone. VIP/KVIP/SVIP/XVIP names are platform-specific and may represent different configuration tiers. AI must consume normalized configuration/duration evidence rather than infer comparability from names.
 
 ## When to use
 
 Use this skill when the user asks for:
 
-- 云手机基准价监测
+- 云手机基准价监测、竞品价格变化与历史趋势
 - UgPhone 作为参照系的竞品比价
 - VSPhone / Redfinger / LDCloud 价格变化
-- 近似配置、质量调整价格、同购买周期比较
+- 近似配置、质量调整价格、同购买周期比较、市场位置
 - 活动价、涨跌、库存、地区、促销文案变化
-- 云手机产品价格趋势与市场位置分析
+- Dashboard 数据分析与可视化
+- AI 市场简报 / Ask Pricing Copilot 自然语言查询
+- “为什么被判定为 high / slightly_high”一类证据化解释
+- Pricing What-if 调价模拟
+- AI Evaluation / Benchmark / evidence-grounding 审计
 
 ## Safety and accuracy rules
 
@@ -37,6 +43,10 @@ Use this skill when the user asks for:
 9. Historical rows without `purchase_mode` are treated as subscription rows for backward compatibility.
 10. VSPhone collection may change only the pricing-page auto-renew filter, must keep quantity at 1, read duration-card prices, ignore the footer order total, restore auto-renew when appropriate, and never click the final create/order button.
 11. Authentication used by the local collector must originate from a local Playwright browser context. A ChatGPT Work / Cloud Browser session is isolated and must never be treated as a source for local collector cookies, storage state, persistent profiles, or runtime context.
+12. For AI output, deterministic data/query tools are authoritative for numeric facts. An LLM may understand the question, select tools and explain returned facts, but must not invent or independently recalculate unsupported prices, medians, similarity scores, relative indexes, thresholds or dates.
+13. AI answers must preserve `data_origin`, `analysis_status`, observation state and data revision. A `carry_forward` value is not a newly observed price.
+14. If structured evidence is insufficient, the AI layer must abstain or state the limitation rather than infer a nonexistent SKU, configuration, time point or causal explanation.
+15. AI provider credentials are backend-only secrets. Never place an API key in `VITE_*`, Dashboard JavaScript, static GitHub Pages assets, AI context JSON, logs or public release files.
 
 ## Authentication execution routing (hard rule)
 
@@ -108,15 +118,28 @@ For a new machine or missing Playwright runtime:
 powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\INSTALL.ps1 -InstallDependencies
 ```
 
+Optional AI backend dependencies can be installed after the base `.venv` exists:
+
+```powershell
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\install_ai_dependencies_windows.ps1
+```
+
+Or during installation:
+
+```powershell
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\INSTALL.ps1 -InstallDependencies -InstallAIDependencies
+```
+
 The installer is fail-fast: required source files are validated before copy and required installed files are validated again after copy. Missing `install_dependencies_windows.ps1`, `login_controller.py`, or other required files must fail installation rather than produce a partial Skill.
 
 The installed Skill has one runtime authority: `<SkillRoot>\.venv\Scripts\python.exe`. `LOGIN.ps1`, scheduled collection and deployment verification must use that interpreter and must not silently fall back to PATH/system Python. Only `install_dependencies_windows.ps1` may discover a system Python, solely to create/repair `.venv`. The installer launch-tests Playwright Chromium; Google Chrome is not required.
 
-Developer/test dependencies:
+Developer/test dependencies use the same dedicated runtime:
 
 ```powershell
-python -m pip install -r requirements-dev.txt
+.\.venv\Scripts\python.exe -m pip install -r requirements-dev.txt -c constraints-runtime.txt
 .\RUN_TESTS.ps1
+.\RUN_AI_TESTS.ps1
 ```
 
 ## Baseline workflow
@@ -200,6 +223,87 @@ The scheduled login preflight uses the same stronger non-UgPhone saved-state ver
 Saved login states and login-controller files must remain local under `output/auth/` and must not be uploaded or shared.
 
 Public release tooling must be non-mutating with respect to staging validation: run release-facing Python with bytecode writes disabled (`-B` / `PYTHONDONTWRITEBYTECODE=1`), and reject any unexpected staging file before ZIP creation. `MANIFEST_SHA256.txt` must be regenerated from a clean explicit-allowlist staging tree and verified before upload.
+
+## AI decision-support workflow
+
+### Design principle
+
+Do **not** send the complete raw Dashboard dataset to an LLM and ask it to calculate pricing results. The supported path is:
+
+```text
+user question
+→ semantic/tool routing
+→ deterministic query/calculation
+→ compact evidence records
+→ optional LLM explanation
+→ answer + fact/evidence IDs + data date/revision
+```
+
+The semantic layer is built from already-safe Dashboard exports:
+
+```powershell
+.\.venv\Scripts\python.exe -B .\build_ai_context.py
+```
+
+It writes `dashboard/public/dashboard_data/ai/` with:
+
+- `manifest.json`
+- `market_summary.json`
+- `config_index.json`
+- `price_events.json`
+- `pairing_index.json`
+- `trend_index.json`
+- `metric_dictionary.json`
+- `question_examples.json`
+- `market_brief.txt`
+
+Each normalized fact receives a stable `fact_id` where applicable. The AI service and Dashboard expose these IDs as evidence instead of allowing prose to become its own source.
+
+### Deterministic tool surface
+
+Keep the public tool surface compact and stable:
+
+```text
+get_market_overview
+search_configs
+compare_configuration
+get_pairing_evidence
+get_price_changes
+get_price_history
+get_metric_definition
+simulate_price
+```
+
+`simulate_price` changes only the proposed UgPhone price while holding the current competitor evidence/revision fixed. Relative index and market-position classification are calculated by code, not by the language model.
+
+### AI modes
+
+The Dashboard supports two modes:
+
+1. **Evidence Mode**: default public/GitHub Pages mode. It queries static safe AI context and requires no provider credential.
+2. **LLM backend mode**: optional FastAPI service. A provider adapter may use an operator-configured OpenAI-compatible chat-completions endpoint, but no vendor/model/key is hard-coded into the repository.
+
+Start the optional service with:
+
+```powershell
+.\.venv\Scripts\python.exe -B .\run_ai_api.py
+```
+
+Frontend code receives only `VITE_AI_API_BASE_URL`. Provider configuration stays in backend environment variables.
+
+### Explain and What-if
+
+`AI Explain` must return the deterministic pricing result first, then pairing/data-origin evidence, then optional interpretation. `Pricing What-if` must show old/new relative index and old/new market position from deterministic calculations.
+
+### Evaluation
+
+Run:
+
+```powershell
+.\RUN_AI_TESTS.ps1
+```
+
+The bundled demo benchmark is synthetic and validates tool-layer routing, evidence coverage, numeric retrieval and correct abstention. Do **not** report bundled demo scores as production LLM quality. Production portfolio metrics should be measured on a safe real-data benchmark and include numeric exact match, unsupported-claim rate, evidence coverage, abstention accuracy, latency and provider/model/data revision.
 
 ## Output
 
@@ -335,9 +439,12 @@ Only `strong_match` and `adjusted_match` enter the core competitor median. `weak
 5. Review `products.xlsx` for product-table quality.
 6. Review `daily_changes.xlsx` for same-product changes.
 7. Review `quality_price_report.xlsx` for pairing, adjusted comparison and relative index.
-8. Rebuild/open the Dashboard when the user wants interactive review.
-9. If a platform returns no valid records, inspect screenshots, HTML, API responses and blocked reasons.
-10. Do not change scraper logic unless the currently collected evidence is genuinely insufficient.
+8. Rebuild Dashboard history and run `build_ai_context.py` before Dashboard/AI publication.
+9. Use deterministic AI tools for numerical query, Explain and What-if; attach fact/evidence IDs and data revision to AI answers.
+10. Run the AI benchmark when changing semantic schemas, tools, routing or evidence behavior.
+11. Rebuild/open the Dashboard when the user wants interactive review.
+12. If a platform returns no valid records, inspect screenshots, HTML, API responses and blocked reasons.
+13. Do not change scraper logic unless the currently collected evidence is genuinely insufficient.
 
 ## Redfinger price-SKU integrity
 
@@ -356,4 +463,17 @@ Never publish or expose:
 - account information
 - private baseline workbooks
 - persistent browser login profiles
+- AI provider/API credentials
+- backend `.env` files
 - other sensitive runtime artifacts
+
+## v2 public-readiness hardening
+
+Canonical public verification additionally requires:
+
+- Python 3.12.x + Node.js 22.x + Playwright 1.62.0 as the recommended baseline, with Python 3.13/3.14 and Node.js 24 admitted only when the complete compatibility gates pass;
+- destructive demo output guarded to controlled runtime/temp directories only;
+- Git-tracked files validated independently of `.gitignore`;
+- FastAPI readiness bound to the current process PID, per-launch token and expected AI data revision;
+- optional provider configuration loaded from private `ai.env` without exposing secrets to Vite/frontend source;
+- migration of private history/baseline/local config handled separately from public source.

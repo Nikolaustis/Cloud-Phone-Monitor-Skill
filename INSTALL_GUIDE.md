@@ -1,157 +1,118 @@
-# Installation Guide
+# Installation Guide — Cloud Phone Pricing Intelligence Skill
 
-本文档说明如何安装并开始使用 Cloud Phone Baseline Price Monitor。
+## 1. Requirements
 
-## 1. 环境要求
+- Windows 10/11 for the canonical local collector/login workflow.
+- CPython 3.12, 3.13 or 3.14 available as a bootstrap interpreter; the installed Skill runtime is `.venv\Scripts\python.exe`. Python 3.12 is recommended, not mandatory.
+- Node.js 22.x or 24.x with npm when building the React Dashboard.
+- Git only when using Git-based deployment/publishing.
 
-建议环境：
+System Google Chrome is not required. The runtime installer installs the Playwright Chromium build matched to the pinned Python Playwright package.
 
-- Windows 10 / 11
-- Python 3.12+
-- Node.js 与 npm
-- Chromium / Playwright
-- Git（仅在使用可选 GitHub Pages 发布时需要）
-
-## 2. 安装
+## 2. Base installation
 
 ```powershell
 powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\INSTALL.ps1
 ```
 
-首次部署并安装依赖：
+New machine / create the canonical `.venv` and Playwright Chromium:
 
 ```powershell
 powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\INSTALL.ps1 -InstallDependencies
 ```
 
-也可以单独安装依赖：
+Install Dashboard npm dependencies as well:
 
 ```powershell
-powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\install_dependencies_windows.ps1
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\INSTALL.ps1 -InstallDependencies -InstallDashboardDependencies
 ```
 
-## 3. 首次登录
+## 3. Optional AI backend dependencies
 
-安装后的正式登录入口是 `LOGIN.ps1`。
+The public Dashboard does not require an LLM backend. Evidence Mode works from static `dashboard_data/ai` files.
 
-### 3.1 人工 PowerShell 模式
+To install FastAPI/uvicorn for the optional AI service:
 
 ```powershell
-.\LOGIN.ps1 UgPhone
-.\LOGIN.ps1 VSPhone
-.\LOGIN.ps1 Redfinger
-.\LOGIN.ps1 LDCloud
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\install_ai_dependencies_windows.ps1
 ```
 
-脚本会启动**本机 Playwright Chromium**。必须在这个弹出的浏览器窗口中完成登录；登录完成后保持窗口打开，再回到 PowerShell 按 Enter，由脚本自动验证并保存状态。
-
-### 3.2 Work / Codex 本地 Agent 模式
-
-如果 Agent 可以执行当前电脑上的本地 Windows shell，应使用两阶段控制器：
+or during installation:
 
 ```powershell
-.\LOGIN.ps1 UgPhone -Start
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\INSTALL.ps1 -InstallDependencies -InstallAIDependencies
 ```
 
-当输出出现：
+AI dependencies are installed into the same canonical Skill `.venv`; the installer does not create a second Python environment.
 
-```text
-LOGIN_AGENT_STATE=WAITING_FOR_USER
-```
-
-Agent 应停止继续操作，让用户在新弹出的**本机 Chromium** 中完成登录，并在聊天中回复“已完成”。之后 Agent 执行：
+## 4. Collector login
 
 ```powershell
-.\LOGIN.ps1 UgPhone -Complete
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\LOGIN.ps1 UgPhone
 ```
 
-成功标志为：
+Agent two-stage flow:
 
-```text
-LOGIN_AGENT_STATE=SAVED_AND_VERIFIED
+```powershell
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\LOGIN.ps1 UgPhone -Start
+# complete login in LOCAL Chromium
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\LOGIN.ps1 UgPhone -Complete
 ```
 
-VSPhone、Redfinger、LDCloud 使用相同的 `-Start` / `-Complete` 流程。`-Status` 可检查当前会话，`-Cancel` 可终止未完成会话而不删除此前已保存的认证状态。
+ChatGPT Work / Cloud Browser authentication is isolated and must not be used as collector state.
 
-如果当前 Agent 没有本地 shell / 本地项目文件系统执行能力，**不得改用 ChatGPT Work / Cloud Browser 登录**；应停止自动流程并提示用户手工运行 `LOGIN.ps1`。Cloud Browser 的 Cookie、localStorage、sessionStorage 等会话数据与本机项目隔离，不能写入或替代 `output/auth/` 中的本地认证材料。
+## 5. Collection and AI semantic context
 
-UgPhone 登录成功后应建立：
-
-```text
-output/auth/ugphone_state.json
-output/auth/ugphone_profile/
-output/auth/ugphone_runtime_context.json
+```powershell
+.\.venv\Scripts\python.exe .\run.py
+.\.venv\Scripts\python.exe -B .\build_ai_context.py
 ```
 
-两阶段 Agent 会话还会暂时使用：
+The AI context is written under `dashboard/public/dashboard_data/ai/` and contains only safe, derived Dashboard data.
 
-```text
-output/auth/ugphone_login_agent_session.json
-```
+## 6. Dashboard and optional AI API
 
-该控制文件只保存本地进程 id、路径和编排状态，在完成或取消后自动删除。
-
-UgPhone 会在保存后重新打开 persistent profile，并用与计划任务等价的 headless 环境再次验证。其他平台当前保存 Playwright storage state；其平台特定 live-auth 验证严格程度低于 UgPhone。
-
-`python run.py --headed` 仅作为可见模式调试采集入口，不作为正式的首次登录/持久化入口。
-
-登录状态应保留在本机，不要上传或共享 Cookie、Token、storage state、Agent 控制文件、持久化浏览器配置或账号信息。
-
-## 4. 第一次采集
-
-```bash
-python run.py
-```
-
-确认输出无误后：
-
-```bash
-python run.py --init-baseline
-```
-
-## 5. Dashboard
-
-本地查看：
-
-```bash
+```powershell
 cd dashboard
+npm ci
 npm run dev
 ```
 
-生成历史数据：
-
-```bash
-python rebuild_dashboard_history.py --incremental
-```
-
-构建静态页面：
-
-```bash
-cd dashboard
-npm run build
-```
-
-## 6. 可选 GitHub Pages 发布
-
-GitHub Pages 发布默认关闭。
-
-如需启用：
+Optional backend:
 
 ```powershell
-Copy-Item .\publisher.local.example.json .\publisher.local.json
+.\.venv\Scripts\python.exe -B .\run_ai_api.py
 ```
 
-编辑 `publisher.local.json`，填写自己的 `dashboard_site_remote`。
+Provider configuration is backend-only. Copy values from `ai.env.example` into local environment configuration; never expose `AI_LLM_API_KEY` through Vite variables.
 
-没有该本地配置时，Windows 日常任务只执行采集、历史重建、构建和验证，不会执行 `git clone`、`git commit` 或 `git push`。
+## 7. Tests
 
-## 7. 数据备份
-
-长期历史建议备份：
-
-```text
-output/
-baselines/
+```powershell
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\RUN_TESTS.ps1
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\RUN_AI_TESTS.ps1
 ```
 
-登录状态和 `publisher.local.json` 属于本地配置，应单独、安全保存。
+## 8. Public release
+
+After overlaying changes into the complete repository, regenerate the canonical release contract:
+
+```powershell
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\PREPARE_RELEASE.ps1
+```
+
+Do not upload a developer working tree containing `.venv`, auth state, private baselines, runtime output, provider keys or generated private diagnostics.
+
+## v2 reproducibility requirements
+
+The recommended baseline is **Python 3.12.x + Node.js 22.x + Playwright 1.62.0**. Supported compatibility runtimes are **Python 3.12-3.14** and **Node.js 22 or 24**; the bootstrap uses an already-active supported Python instead of forcing a downgrade.
+
+After installing any supported Python 3.12-3.14 and Node.js 22 or 24, the preferred clean-machine command is:
+
+```powershell
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\VERIFY_V2.ps1 -Bootstrap
+```
+
+If the machine already has Python 3.13 or 3.14, it may be used directly. The release gate still requires the pinned dependencies, tests and Chromium launch to pass. Use `-PythonVersion 3.12|3.13|3.14` on the dependency installer when an exact interpreter is required for reproducibility testing.
+
+Optional AI provider configuration can be placed in the local `ai.env` file copied from `ai.env.example`; it is loaded automatically and must not be committed.
